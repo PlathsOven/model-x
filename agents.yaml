@@ -1,0 +1,19 @@
+# ModelX participant config — read by run_demo.py.
+# Add or remove agents by editing this file. The script has no hardcoded names.
+#
+# `model: human` uses the CLI HumanAgent (you'll be prompted for each decision).
+# Anything else is an OpenRouter model id and routes through OpenRouterAgent
+# (requires OPENROUTER_API_KEY in your environment).
+
+agents:
+  - name: claude-sonnet
+    model: anthropic/claude-sonnet-4
+    role: MM
+
+  - name: gpt-4o
+    model: openai/gpt-4o
+    role: MM
+
+  - name: deepseek-r1
+    model: deepseek/deepseek-r1
+    role: HF
