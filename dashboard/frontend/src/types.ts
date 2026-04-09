@@ -28,8 +28,18 @@ export interface EpisodeStats {
 
 export type EpisodeStatus = "ok" | "db_missing" | "no_contracts" | "error";
 
+export type MarketState =
+  | "RUNNING"
+  | "PENDING_SETTLEMENT"
+  | "SETTLED"
+  | "PAUSED";
+
 export interface Episode {
   contract: ContractInfo | null;
+  // Live multi-market fields. Legacy demo dashboards still get sensible
+  // defaults (market_state derived from settlement_value).
+  market_state?: MarketState;
+  current_cycle?: number;
   num_cycles: number;
   settled: boolean;
   accounts: AccountSummary[];
@@ -43,6 +53,44 @@ export interface Episode {
   loaded_at: number;
   db_mtime: number;
   traces_mtime: number;
+}
+
+export interface MarketSummary {
+  id: string;
+  name: string;
+  description: string;
+  state: MarketState;
+  current_cycle: number;
+  num_cycles: number;
+  settlement_date: string | null;
+  settlement_value: number | null;
+  multiplier: number;
+  settled: boolean;
+}
+
+export interface LifetimePerMarket {
+  market_id: string;
+  role: "MM" | "HF";
+  total_pnl: number | null;
+  sharpe: number | null;
+  volume: number | null;
+  settled_at: number | null;
+}
+
+export interface LifetimeAgent {
+  account_id: string;
+  name: string;
+  markets_traded: number;
+  total_pnl: number;
+  total_volume: number;
+  avg_sharpe: number;
+  best_market_pnl: number;
+  worst_market_pnl: number;
+  per_market: LifetimePerMarket[];
+}
+
+export interface LifetimeMetrics {
+  agents: Record<string, LifetimeAgent>;
 }
 
 export interface CycleRow {

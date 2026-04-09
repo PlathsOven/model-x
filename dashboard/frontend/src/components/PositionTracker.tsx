@@ -23,9 +23,11 @@ type Metric = "position" | "pnl" | "cash";
 export function PositionTracker({
   episode,
   dataVersion,
+  marketId,
 }: {
   episode: Episode;
   dataVersion: number;
+  marketId?: string | null;
 }) {
   const [pos, setPos] = useState<PositionsResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -36,10 +38,10 @@ export function PositionTracker({
 
   useEffect(() => {
     api
-      .positions()
+      .positions(marketId)
       .then(setPos)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [dataVersion]);
+  }, [dataVersion, marketId]);
 
   // When new agents appear (e.g. live demo just added one) include them in
   // the visible selection by default. Don't touch the selection if the user

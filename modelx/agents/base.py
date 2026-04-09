@@ -1,5 +1,6 @@
 """Abstract Agent interface for MM and HF participants."""
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Optional
@@ -34,8 +35,13 @@ class Agent(ABC):
     """An MM or HF participant.
 
     Concrete implementations (OpenRouterAgent, HumanAgent, ...) implement
-    both methods. Returning None means "skip this cycle" for an MM (counts
-    against uptime) or "pass" for an HF.
+    both sync methods. Returning None means "skip this cycle" for an MM
+    (counts against uptime) or "pass" for an HF.
+
+    The async variants `get_quote_async` / `get_order_async` are used by the
+    live multi-market scheduler. The default implementation runs the sync
+    method in a threadpool, so existing agents work without modification;
+    OpenRouterAgent overrides them to make true non-blocking httpx calls.
     """
 
     @abstractmethod
@@ -47,6 +53,18 @@ class Agent(ABC):
     def get_order(self, ctx: AgentContext, book: List[BookLevel]) -> Optional[Order]:
         """Return this agent's HF market order for the cycle, or None to pass."""
         ...
+
+    async def get_quote_async(self, ctx: AgentContext) -> Optional[Quote]:
+        """Async wrapper around `get_quote`. Override for native async I/O."""
+        return await asyncio.to_thread(self.get_quote, ctx)
+
+    async def get_order_async(
+        self,
+        ctx: AgentContext,
+        book: List[BookLevel],
+    ) -> Optional[Order]:
+        """Async wrapper around `get_order`. Override for native async I/O."""
+        return await asyncio.to_thread(self.get_order, ctx, book)
 
 
 def format_book(book: List[BookLevel]) -> str:

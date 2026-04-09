@@ -4,6 +4,7 @@ import {
   Activity,
   BarChart3,
   BookOpen,
+  Globe,
   Home,
   LineChart as LineChartIcon,
   ListTree,
@@ -12,7 +13,7 @@ import {
   Trophy,
 } from "lucide-react";
 import { api } from "./api";
-import type { Episode, EpisodeStatus } from "./types";
+import type { Episode, EpisodeStatus, MarketSummary } from "./types";
 import { EpisodeOverview } from "./components/EpisodeOverview";
 import { TimeSeriesChart } from "./components/TimeSeriesChart";
 import { TradeLog } from "./components/TradeLog";
@@ -20,6 +21,7 @@ import { OrderbookViewer } from "./components/OrderbookViewer";
 import { ReasoningTraces } from "./components/ReasoningTraces";
 import { PerformanceMetrics } from "./components/PerformanceMetrics";
 import { PositionTracker } from "./components/PositionTracker";
+import { LifetimeMetricsView } from "./components/LifetimeMetrics";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -37,7 +39,8 @@ type ViewKey =
   | "orderbook"
   | "traces"
   | "metrics"
-  | "positions";
+  | "positions"
+  | "lifetime";
 
 interface NavItem {
   key: ViewKey;
@@ -53,6 +56,7 @@ const NAV: NavItem[] = [
   { key: "metrics", label: "Metrics", icon: Trophy },
   { key: "positions", label: "Positions", icon: BarChart3 },
   { key: "traces", label: "Reasoning", icon: MessageSquare },
+  { key: "lifetime", label: "Lifetime", icon: Globe },
 ];
 
 export default function App() {
@@ -62,6 +66,11 @@ export default function App() {
   const [reloading, setReloading] = useState(false);
   const [focusCycle, setFocusCycle] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now() / 1000);
+
+  // Multi-market state. `marketsList` is the dropdown source, `marketId`
+  // is the currently-selected market (null = default to first).
+  const [marketsList, setMarketsList] = useState<MarketSummary[]>([]);
+  const [marketId, setMarketId] = useState<string | null>(null);
 
   // Keep a wall-clock tick going so the "updated Xs ago" string in the
   // sidebar stays current even when the backend hasn't changed.
@@ -75,22 +84,32 @@ export default function App() {
   // data via useEffect([dataVersion]).
   const loadEpisode = useCallback(async () => {
     try {
-      const ep = await api.episode();
+      const ep = await api.episode(marketId);
       setEpisode(ep);
       setError(null);
     } catch (e: any) {
       setError(e?.message || String(e));
     }
-  }, []);
+  }, [marketId]);
 
   useEffect(() => {
     let cancelled = false;
     const tick = async () => {
       if (cancelled) return;
       try {
-        const ep = await api.episode();
+        const [ep, mks] = await Promise.all([
+          api.episode(marketId),
+          api.markets().catch(() => [] as MarketSummary[]),
+        ]);
         if (cancelled) return;
         setEpisode(ep);
+        setMarketsList(mks);
+        // If the user hasn't picked a market and we just discovered some,
+        // implicitly use the first one — keeps the URL/state in sync with
+        // what /api/episode returned.
+        if (marketId === null && mks.length > 0 && ep.contract) {
+          setMarketId(ep.contract.id);
+        }
         setError(null);
       } catch (e: any) {
         if (cancelled) return;
@@ -103,7 +122,7 @@ export default function App() {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, [marketId]);
 
   const handleReload = async () => {
     setReloading(true);
@@ -225,6 +244,16 @@ export default function App() {
 
       {/* Main content */}
       <main className="flex-1 overflow-y-auto">
+        {/* Multi-market selector header. Hidden on the lifetime tab (which
+            is global) and when there's nothing to select. */}
+        {marketsList.length > 0 && active !== "lifetime" && (
+          <MarketSelector
+            markets={marketsList}
+            value={marketId}
+            onChange={setMarketId}
+          />
+        )}
+
         {error && (
           <div className="m-6 rounded border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
             <div className="font-semibold mb-1">Error talking to backend</div>
@@ -241,12 +270,26 @@ export default function App() {
           <div className="p-8 text-zinc-500 text-sm">Loading…</div>
         )}
 
-        {episode && !episode.loaded && <WaitingScreen episode={episode} />}
+        {episode && !episode.loaded && active !== "lifetime" && (
+          <WaitingScreen episode={episode} />
+        )}
 
-        {episode && episode.loaded && (
+        {/* Lifetime tab is global — it works even when no individual market
+            is loaded yet, so we render it independently of episode.loaded. */}
+        {active === "lifetime" && (
+          <div className="p-6">
+            <LifetimeMetricsView dataVersion={dataVersion} />
+          </div>
+        )}
+
+        {episode && episode.loaded && active !== "lifetime" && (
           <div className="p-6">
             {active === "overview" && (
-              <EpisodeOverview episode={episode} dataVersion={dataVersion} />
+              <EpisodeOverview
+                episode={episode}
+                dataVersion={dataVersion}
+                marketId={marketId}
+              />
             )}
             {active === "timeseries" && (
               <TimeSeriesChart
@@ -254,6 +297,7 @@ export default function App() {
                 dataVersion={dataVersion}
                 focusCycle={focusCycle}
                 onClearFocus={() => setFocusCycle(null)}
+                marketId={marketId}
               />
             )}
             {active === "tradelog" && (
@@ -261,6 +305,7 @@ export default function App() {
                 episode={episode}
                 dataVersion={dataVersion}
                 onCycleClick={(c) => jumpToCycle(c, "timeseries")}
+                marketId={marketId}
               />
             )}
             {active === "orderbook" && (
@@ -268,13 +313,22 @@ export default function App() {
                 episode={episode}
                 dataVersion={dataVersion}
                 initialCycle={focusCycle ?? 0}
+                marketId={marketId}
               />
             )}
             {active === "metrics" && (
-              <PerformanceMetrics episode={episode} dataVersion={dataVersion} />
+              <PerformanceMetrics
+                episode={episode}
+                dataVersion={dataVersion}
+                marketId={marketId}
+              />
             )}
             {active === "positions" && (
-              <PositionTracker episode={episode} dataVersion={dataVersion} />
+              <PositionTracker
+                episode={episode}
+                dataVersion={dataVersion}
+                marketId={marketId}
+              />
             )}
             {active === "traces" && (
               <ReasoningTraces episode={episode} dataVersion={dataVersion} />
@@ -282,6 +336,63 @@ export default function App() {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+function MarketSelector({
+  markets,
+  value,
+  onChange,
+}: {
+  markets: MarketSummary[];
+  value: string | null;
+  onChange: (id: string) => void;
+}) {
+  // Use the first market as the visible default when no value is set yet.
+  const current = value ?? markets[0]?.id ?? "";
+  const selected = markets.find((m) => m.id === current);
+
+  return (
+    <div className="border-b border-zinc-800 bg-zinc-950/40 px-6 py-3 flex items-center gap-3">
+      <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+        Market
+      </span>
+      <select
+        value={current}
+        onChange={(e) => onChange(e.target.value)}
+        className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm font-mono text-zinc-100 focus:outline-none focus:border-emerald-500"
+      >
+        {markets.map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.name} ({m.id})
+          </option>
+        ))}
+      </select>
+      {selected && (
+        <div className="flex items-center gap-2 text-xs text-zinc-500">
+          <span
+            className={
+              "rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider border " +
+              (selected.state === "RUNNING"
+                ? "border-emerald-800 bg-emerald-900/30 text-emerald-300"
+                : selected.state === "PENDING_SETTLEMENT"
+                  ? "border-amber-800 bg-amber-900/30 text-amber-300"
+                  : selected.state === "SETTLED"
+                    ? "border-blue-800 bg-blue-900/30 text-blue-300"
+                    : "border-zinc-700 bg-zinc-800 text-zinc-300")
+            }
+          >
+            {selected.state.toLowerCase().replace("_", " ")}
+          </span>
+          <span>
+            cycle {selected.current_cycle} / {selected.num_cycles}
+          </span>
+          {selected.settlement_date && (
+            <span>· settles {selected.settlement_date}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

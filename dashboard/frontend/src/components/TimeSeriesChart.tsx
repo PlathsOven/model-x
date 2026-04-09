@@ -73,11 +73,13 @@ export function TimeSeriesChart({
   dataVersion,
   focusCycle,
   onClearFocus,
+  marketId,
 }: {
   episode: Episode;
   dataVersion: number;
   focusCycle: number | null;
   onClearFocus: () => void;
+  marketId?: string | null;
 }) {
   const [ts, setTs] = useState<Timeseries | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -95,10 +97,10 @@ export function TimeSeriesChart({
 
   useEffect(() => {
     api
-      .timeseries()
+      .timeseries(marketId)
       .then(setTs)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [dataVersion]);
+  }, [dataVersion, marketId]);
 
   const agentColors = useMemo(() => {
     if (!ts) return {};

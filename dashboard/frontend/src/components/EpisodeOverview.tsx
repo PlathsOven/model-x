@@ -7,19 +7,21 @@ import { Card, RoleBadge, SectionHeader, StatPill } from "./ui";
 export function EpisodeOverview({
   episode,
   dataVersion,
+  marketId,
 }: {
   episode: Episode;
   dataVersion: number;
+  marketId?: string | null;
 }) {
   const [cycles, setCycles] = useState<CycleRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     api
-      .cycles()
+      .cycles(marketId)
       .then(setCycles)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [dataVersion]);
+  }, [dataVersion, marketId]);
 
   const { contract, stats, accounts, settled, num_cycles } = episode;
 

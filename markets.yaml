@@ -1,0 +1,37 @@
+# ModelX live markets — read by run_markets.py.
+# Add or remove markets by editing this file.
+#
+# `phase_duration_seconds` is GLOBAL: a single wall-clock tick interval that
+# applies to every market simultaneously. Each tick fires one phase (MM or HF)
+# in every active market. With the default 1800s, the clock ticks at every
+# half-hour boundary (00:00, 00:30, 01:00, …); markets advance together.
+#
+# Each market in `markets:` is independent — its own contract, settlement,
+# multiplier, and info schedule. All agents from agents.yaml participate in
+# every market (positions are isolated per market).
+#
+# Total wall-clock time per market = num_cycles * 2 * phase_duration_seconds
+# (each cycle has one MM phase and one HF phase).
+
+phase_duration_seconds: 180
+
+markets:
+  - id: cpi-yoy-may-2025
+    name: "US CPI YoY May 2025"
+    description: "What will US CPI YoY print for May 2025 (BLS release Jun 11)?"
+    settlement_date: "2025-06-11"
+    multiplier: 1.0
+    position_limit: 100
+    num_cycles: 20
+    max_size: 100
+    info_schedule:
+      0:
+        - "US CPI has printed 2.4%, 2.6%, 2.8%, 2.3%, 2.9% over the last five months. The Fed has held rates steady at the last two meetings."
+      2:
+        - "Goldman Sachs economists forecast May CPI at 2.7% YoY, citing moderating energy prices offset by persistent services inflation."
+      5:
+        - "Cleveland Fed inflation nowcast for May CPI: 2.85% YoY. This model has had a mean absolute error of 0.12pp over the last 12 months."
+      10:
+        - "2-year Treasury yield fell 5bps to 4.18% — bond markets pricing in slightly lower inflation expectations."
+      15:
+        - "April PCE inflation came in at 2.5%, slightly below expectations of 2.6%."

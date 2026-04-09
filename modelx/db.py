@@ -13,7 +13,16 @@ Pass `":memory:"` for an ephemeral in-process db (tests, one-off runs).
 import sqlite3
 from typing import Dict, List, Optional
 
-from .models import Account, Contract, CycleState, Fill, Order, Quote
+from .models import (
+    Account,
+    Contract,
+    CycleState,
+    Fill,
+    LifetimeStat,
+    Market,
+    Order,
+    Quote,
+)
 
 
 SCHEMA = """
@@ -22,7 +31,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     name             TEXT NOT NULL,
     role             TEXT NOT NULL,
     model            TEXT NOT NULL,
-    points           REAL NOT NULL DEFAULT 0
+    points           REAL NOT NULL DEFAULT 0,
+    market_id        TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS contracts (
@@ -85,6 +95,32 @@ CREATE TABLE IF NOT EXISTS fills (
     created_at         REAL NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS markets (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    description       TEXT NOT NULL,
+    multiplier        REAL NOT NULL DEFAULT 1.0,
+    position_limit    INTEGER NOT NULL DEFAULT 100,
+    num_cycles        INTEGER NOT NULL DEFAULT 20,
+    max_size          INTEGER NOT NULL DEFAULT 50,
+    settlement_date   TEXT,
+    state             TEXT NOT NULL DEFAULT 'RUNNING',
+    current_cycle     INTEGER NOT NULL DEFAULT 0,
+    pending_mm        INTEGER NOT NULL DEFAULT 1,
+    created_at        REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS agent_lifetime_stats (
+    account_id        TEXT NOT NULL,
+    market_id         TEXT NOT NULL,
+    role              TEXT NOT NULL,
+    total_pnl         REAL,
+    sharpe            REAL,
+    volume            INTEGER,
+    settled_at        REAL,
+    PRIMARY KEY (account_id, market_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_quotes_cycle  ON quotes  (cycle_id);
 CREATE INDEX IF NOT EXISTS idx_orders_cycle  ON orders  (cycle_id);
 CREATE INDEX IF NOT EXISTS idx_fills_cycle   ON fills   (cycle_id);
@@ -92,17 +128,42 @@ CREATE INDEX IF NOT EXISTS idx_fills_contract ON fills  (contract_id);
 CREATE INDEX IF NOT EXISTS idx_cycles_contract ON cycle_states (contract_id);
 """
 
+# Indexes that depend on migrated columns. Created after _maybe_migrate so
+# old databases (which need ALTER TABLE first) don't fail.
+POST_MIGRATION_SCHEMA = """
+CREATE INDEX IF NOT EXISTS idx_accounts_market ON accounts (market_id);
+"""
+
 
 def connect(path: str) -> sqlite3.Connection:
     """Open a SQLite connection with the ModelX schema applied.
 
     `path` can be a filesystem path or `":memory:"` for an ephemeral db.
+    Old databases (pre-multi-market) are silently migrated forward.
     """
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _maybe_migrate(conn)
+    conn.executescript(POST_MIGRATION_SCHEMA)
     conn.commit()
     return conn
+
+
+def _maybe_migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent migrations for older databases.
+
+    The new `accounts.market_id` column is created via `CREATE TABLE IF NOT
+    EXISTS` for fresh databases, but existing tables need an explicit
+    `ALTER TABLE`. SQLite raises if the column already exists, which is the
+    desired no-op behavior.
+    """
+    try:
+        conn.execute(
+            "ALTER TABLE accounts ADD COLUMN market_id TEXT NOT NULL DEFAULT ''"
+        )
+    except sqlite3.OperationalError:
+        pass  # column already exists
 
 
 # ---------- accounts ----------
@@ -110,13 +171,14 @@ def connect(path: str) -> sqlite3.Connection:
 def upsert_account(conn: sqlite3.Connection, account: Account) -> None:
     conn.execute(
         """
-        INSERT INTO accounts (id, name, role, model, points)
-        VALUES (:id, :name, :role, :model, :points)
+        INSERT INTO accounts (id, name, role, model, points, market_id)
+        VALUES (:id, :name, :role, :model, :points, :market_id)
         ON CONFLICT(id) DO UPDATE SET
-            name   = excluded.name,
-            role   = excluded.role,
-            model  = excluded.model,
-            points = excluded.points
+            name      = excluded.name,
+            role      = excluded.role,
+            model     = excluded.model,
+            points    = excluded.points,
+            market_id = excluded.market_id
         """,
         account.__dict__,
     )
@@ -130,6 +192,17 @@ def get_account(conn: sqlite3.Connection, account_id: str) -> Optional[Account]:
 
 def list_accounts(conn: sqlite3.Connection) -> List[Account]:
     rows = conn.execute("SELECT * FROM accounts ORDER BY id").fetchall()
+    return [Account(**dict(r)) for r in rows]
+
+
+def list_accounts_for_market(
+    conn: sqlite3.Connection,
+    market_id: str,
+) -> List[Account]:
+    rows = conn.execute(
+        "SELECT * FROM accounts WHERE market_id = ? ORDER BY id",
+        (market_id,),
+    ).fetchall()
     return [Account(**dict(r)) for r in rows]
 
 
@@ -262,6 +335,19 @@ def list_orders_by_cycle(
 
 # ---------- fills ----------
 
+def delete_cycle_data(conn: sqlite3.Connection, cycle_id: str) -> None:
+    """Remove all fills, orders, and quotes for a cycle_id.
+
+    Called by open_cycle to clean up stale data from a previously interrupted
+    run that left orphaned rows (e.g. market row was reset but child tables
+    were not).
+    """
+    conn.execute("DELETE FROM fills WHERE cycle_id = ?", (cycle_id,))
+    conn.execute("DELETE FROM orders WHERE cycle_id = ?", (cycle_id,))
+    conn.execute("DELETE FROM quotes WHERE cycle_id = ?", (cycle_id,))
+    conn.commit()
+
+
 def insert_fill(conn: sqlite3.Connection, fill: Fill) -> None:
     conn.execute(
         """
@@ -347,3 +433,106 @@ def positions_before_cycle(
         positions[b] = positions.get(b, 0) + sz
         positions[s] = positions.get(s, 0) - sz
     return positions
+
+
+# ---------- markets ----------
+
+def upsert_market(conn: sqlite3.Connection, market: Market) -> None:
+    conn.execute(
+        """
+        INSERT INTO markets (
+            id, name, description, multiplier, position_limit, num_cycles,
+            max_size, settlement_date, state, current_cycle, pending_mm,
+            created_at
+        ) VALUES (
+            :id, :name, :description, :multiplier, :position_limit, :num_cycles,
+            :max_size, :settlement_date, :state, :current_cycle, :pending_mm,
+            :created_at
+        )
+        ON CONFLICT(id) DO UPDATE SET
+            name            = excluded.name,
+            description     = excluded.description,
+            multiplier      = excluded.multiplier,
+            position_limit  = excluded.position_limit,
+            num_cycles      = excluded.num_cycles,
+            max_size        = excluded.max_size,
+            settlement_date = excluded.settlement_date,
+            state           = excluded.state,
+            current_cycle   = excluded.current_cycle,
+            pending_mm      = excluded.pending_mm
+        """,
+        market.__dict__,
+    )
+    conn.commit()
+
+
+def get_market(conn: sqlite3.Connection, market_id: str) -> Optional[Market]:
+    row = conn.execute(
+        "SELECT * FROM markets WHERE id = ?", (market_id,),
+    ).fetchone()
+    return Market(**dict(row)) if row else None
+
+
+def list_markets(conn: sqlite3.Connection) -> List[Market]:
+    rows = conn.execute(
+        "SELECT * FROM markets ORDER BY created_at, id"
+    ).fetchall()
+    return [Market(**dict(r)) for r in rows]
+
+
+def update_market_progress(
+    conn: sqlite3.Connection,
+    market_id: str,
+    state: str,
+    current_cycle: int,
+    pending_mm: int,
+) -> None:
+    """Persist a market's runtime progress fields after a phase step."""
+    conn.execute(
+        """
+        UPDATE markets
+           SET state = ?, current_cycle = ?, pending_mm = ?
+         WHERE id = ?
+        """,
+        (state, current_cycle, pending_mm, market_id),
+    )
+    conn.commit()
+
+
+# ---------- lifetime stats ----------
+
+def upsert_lifetime_stat(conn: sqlite3.Connection, stat: LifetimeStat) -> None:
+    conn.execute(
+        """
+        INSERT INTO agent_lifetime_stats (
+            account_id, market_id, role, total_pnl, sharpe, volume, settled_at
+        ) VALUES (
+            :account_id, :market_id, :role, :total_pnl, :sharpe, :volume, :settled_at
+        )
+        ON CONFLICT(account_id, market_id) DO UPDATE SET
+            role       = excluded.role,
+            total_pnl  = excluded.total_pnl,
+            sharpe     = excluded.sharpe,
+            volume     = excluded.volume,
+            settled_at = excluded.settled_at
+        """,
+        stat.__dict__,
+    )
+    conn.commit()
+
+
+def list_lifetime_stats(
+    conn: sqlite3.Connection,
+    account_id: Optional[str] = None,
+) -> List[LifetimeStat]:
+    if account_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM agent_lifetime_stats WHERE account_id = ? "
+            "ORDER BY settled_at, market_id",
+            (account_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM agent_lifetime_stats ORDER BY account_id, settled_at"
+        ).fetchall()
+    return [LifetimeStat(**dict(r)) for r in rows]

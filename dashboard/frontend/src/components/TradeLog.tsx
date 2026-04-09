@@ -11,10 +11,12 @@ export function TradeLog({
   episode,
   dataVersion,
   onCycleClick,
+  marketId,
 }: {
   episode: Episode;
   dataVersion: number;
   onCycleClick: (cycle: number) => void;
+  marketId?: string | null;
 }) {
   const lastCycle = Math.max(0, episode.num_cycles - 1);
   const [fills, setFills] = useState<FillRow[] | null>(null);
@@ -28,10 +30,10 @@ export function TradeLog({
 
   useEffect(() => {
     api
-      .fills()
+      .fills(undefined, marketId)
       .then(setFills)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [dataVersion]);
+  }, [dataVersion, marketId]);
 
   // Auto-extend cycleMax when new cycles arrive, but only if the user hasn't
   // narrowed the range below the previous tail (i.e. don't clobber filters).

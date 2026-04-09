@@ -2,6 +2,11 @@
 
 A points-based prediction exchange where Large Language Models (and humans) trade derivative contracts that settle against real-world quantitative outcomes — CPI prints, corporate earnings, temperature readings, anything you can put a number on. Two roles: **Market Makers** post sealed two-sided quotes; **Hedge Funds** see the resulting orderbook and send market orders. The cycle repeats. At settlement you enter the true value, and the engine scores every participant.
 
+ModelX has two modes:
+
+- **Live multi-market mode** (`run_markets.py`) — the primary path. Runs N markets concurrently on a real-time wall-clock schedule, advances every market on each global tick, persists to SQLite. Settle each market manually with `settle.py` when the real-world value is known.
+- **Demo mode** (`run_demo.py`) — single-market, single-shot, manual `Enter` to advance phases, prompts you for a settlement value at the end. Useful for one-off interactive sessions and tutorials.
+
 ## Prerequisites
 
 - Python 3.11 or newer
@@ -63,17 +68,98 @@ Each entry has three fields:
 
 Add or remove participants by editing this file. The script has no hardcoded agent names — anything you put here becomes the cast of the next run.
 
-## What you're trading
+## Configure the markets
 
-Out of the box, the demo runs a 20-cycle episode on:
+Edit `markets.yaml` in the repo root. This file is the primary admin surface — every market you add here becomes a live exchange instance the moment you (re)start the runner.
 
-> **US CPI YoY May 2025** — predict the year-over-year US CPI print for May 2025
+```yaml
+phase_duration_seconds: 1800   # 30 min — global wall-clock tick
 
-The contract has a position limit of 100 and a multiplier of 1.0. Information (analyst forecasts, related releases, market commentary) drips out across the episode on cycles 0, 2, 4, 7, 9, 12, 15, 17, and 19. Every agent sees this information cumulatively as the run progresses.
+markets:
+  - id: cpi-yoy-may-2025
+    name: "US CPI YoY May 2025"
+    description: "What will US CPI YoY print for May 2025 (BLS release Jun 11)?"
+    settlement_date: "2025-06-11"
+    multiplier: 1.0
+    position_limit: 100
+    num_cycles: 20
+    max_size: 100
+    info_schedule:
+      0:
+        - "US CPI has printed 2.4%, 2.6%, 2.8%, 2.3%, 2.9% over the last five months."
+      2:
+        - "Goldman Sachs economists forecast May CPI at 2.7% YoY..."
+      5:
+        - "Cleveland Fed inflation nowcast for May CPI: 2.85% YoY..."
+```
 
-To trade something different, edit `CONTRACT`, `INFO_SCHEDULE_RAW`, and `NUM_CYCLES` near the top of `run_demo.py`.
+Field reference:
 
-## Run an episode
+- **`phase_duration_seconds`** (top level, global) — how long each MM/HF phase lasts. **All markets advance on the same global wall-clock tick.** A 1800s value lines ticks up to clock boundaries (00:00, 00:30, 01:00, …); a 60s value would tick once a minute. Set this to a few seconds when smoke-testing locally, then increase for production runs.
+- **`id`** — short slug used everywhere (account ids, dashboard URLs, settlement CLI). Must be unique.
+- **`name`** / **`description`** — display strings shown to agents and on the dashboard.
+- **`settlement_date`** — when the real-world value is expected. Used for context only — settlement is always manual.
+- **`multiplier`** — scales final P&L. Use this to normalize across markets with very different price scales.
+- **`position_limit`** — absolute cap on each agent's net position (the engine partially fills orders that would exceed this).
+- **`num_cycles`** — total cycles before the market enters `PENDING_SETTLEMENT`. Total wall-clock duration ≈ `num_cycles × 2 × phase_duration_seconds`.
+- **`max_size`** — maximum order size shown to agents in their context.
+- **`info_schedule`** — `{cycle_index: [info string, …]}`. Information drips out cumulatively at the start of the listed cycles.
+
+Every agent in `agents.yaml` participates in **every** market simultaneously, with isolated positions and cash per market.
+
+## Run live markets
+
+```bash
+python3 run_markets.py
+```
+
+Optional flags:
+
+- `--markets markets.yaml` — markets config (default: `markets.yaml`)
+- `--agents agents.yaml` — agents config (default: `agents.yaml`)
+- `--db modelx.db` — SQLite file used for state, scoring and dashboard (default: `modelx.db`)
+
+The supervisor prints the next wall-clock tick time and waits. On every tick, **every active market** advances one phase (MM or HF) in parallel, all LLM calls fan out concurrently with `asyncio.gather`, and progress is persisted to the DB. You can `Ctrl-C` and restart at any time — the runner reloads each market's progress from the DB and resumes mid-cycle if needed (positions, cash, info log, and the residual orderbook all rebuild from stored fills).
+
+When a market hits `num_cycles` it transitions to `PENDING_SETTLEMENT` and stops trading; other markets keep running.
+
+## Settle a market
+
+When you know the real-world value:
+
+```bash
+python3 settle.py --market cpi-yoy-may-2025 --value 2.8
+```
+
+Optional flags:
+
+- `--db modelx.db` — SQLite db (default: `modelx.db`)
+- `--force` — settle a market that isn't in `PENDING_SETTLEMENT` yet
+
+This writes the settlement value to the contract row, computes `score_mm` / `score_hf` for every participant, persists per-market lifetime stats to the `agent_lifetime_stats` table, and prints a final P&L table. After settlement the market shows up under the **Lifetime** tab in the dashboard, aggregated across every other market the same agent has settled in.
+
+## Dashboard
+
+A web dashboard visualizes everything live: per-market timeseries, orderbook, fills, scores, and the cross-market Lifetime tab.
+
+```bash
+# in one terminal, start the runner
+python3 run_markets.py --db modelx.db
+
+# in another terminal, start the dashboard backend (reads modelx.db)
+python3 dashboard/server.py --db modelx.db --port 8000
+
+# in a third terminal, start the dashboard frontend
+cd dashboard/frontend && npm install && npm run dev
+```
+
+The dashboard polls every 2 seconds and live-updates as the runner writes new fills. A market selector dropdown at the top lets you switch between markets; the existing Time Series, Orderbook, Trade Log, Metrics, and Positions tabs all rescope to the selected market. The new **Lifetime** tab is global — it aggregates per-agent stats across every settled market in the database (you'll see it populate after you run `settle.py` on at least one market).
+
+> **Note:** the dashboard server is a long-running Python process that imports `modelx` once at startup. If you upgrade the code (e.g. add a column to a model dataclass), restart the dashboard backend so it re-imports the new classes — otherwise you'll see errors like `Account.__init__() got an unexpected keyword argument 'market_id'`.
+
+## Single-shot demo mode
+
+For a one-off interactive episode (not a persistent live market), use `run_demo.py` instead. It runs a single hard-coded contract, manual `Enter`-to-advance phases, and prompts you for the settlement value at the end:
 
 ```bash
 python3 run_demo.py
@@ -81,9 +167,12 @@ python3 run_demo.py
 
 Optional flags:
 
-- `--config agents.yaml` — path to your participant config (default: `agents.yaml`)
-- `--db modelx.db` — SQLite file to persist the whole run (default: in-memory; everything dies when the process exits)
+- `--config agents.yaml` — agent config (default: `agents.yaml`)
+- `--db modelx.db` — SQLite file to persist the run (default: in-memory)
 - `--traces episode_traces.json` — output path for reasoning traces (default: `episode_traces.json`)
+- `--auto --settlement <float>` — non-interactive mode for scripted runs
+
+To trade something different in demo mode, edit `CONTRACT`, `INFO_SCHEDULE_RAW`, and `NUM_CYCLES` near the top of `run_demo.py`.
 
 You'll see your participants listed, then the cycle loop begins. **Each cycle has 4 manual triggers; press Enter at each to advance.**
 
@@ -132,15 +221,15 @@ End-of-cycle positions print. The next cycle opens.
 
 ## Settlement
 
-After cycle 19 closes, you'll see:
+In live mode, settlement is decoupled from the run loop. When a market reaches its `num_cycles`, it stops trading and enters `PENDING_SETTLEMENT`. When you have the real-world value, run:
 
-```
-============================================================
-All cycles complete. Time to settle.
-Settlement value:
+```bash
+python3 settle.py --market cpi-yoy-may-2025 --value 2.8
 ```
 
-Type the real-world value the contract should settle to, then press Enter. For the demo, that's the actual May 2025 CPI YoY number from the BLS release — for example, `2.8`.
+The engine writes the value to the contract row, computes per-agent P&L, persists lifetime stats, and prints a final scoring table.
+
+In demo mode (`run_demo.py`), the script prompts you for the settlement value interactively at the end of cycle 19.
 
 A short position makes money if settlement comes in below where they sold; a long position makes money if settlement comes in above where they bought. The engine works out the rest.
 
@@ -284,17 +373,16 @@ Human players don't generate trace entries.
 
 ## Persisting between runs
 
-By default the database lives in memory and disappears when the process exits. To keep the full run on disk — every quote, order, fill, cycle state, and account — pass a path:
+In live mode, everything persists to `modelx.db` by default (every quote, order, fill, cycle state, market, and account). Restart `run_markets.py` and it resumes from exactly where it left off.
 
-```bash
-python3 run_demo.py --db modelx.db
-```
+In demo mode (`run_demo.py`), the default is in-memory; pass `--db modelx.db` to persist.
 
-You can then open `modelx.db` with any SQLite client (`sqlite3 modelx.db`) and query it directly.
+You can open `modelx.db` with any SQLite client (`sqlite3 modelx.db`) and query it directly.
 
 ## Tips
 
-- **API budget**: a 20-cycle run with 3 LLM agents is about 80 OpenRouter calls (each MM is asked once per cycle, each HF is asked once per cycle). Cost depends on the models.
-- **Wall time**: real LLM calls take a few seconds each, so a 20-cycle run with 3 agents typically takes 5–15 minutes. The manual Enter triggers exist so you can read each phase and Ctrl-C if anything looks off.
-- **Bad model responses**: if an LLM returns malformed JSON, the error prints inline, that agent skips the cycle, and the run continues. The broken response still lands in `episode_traces.json` so you can debug it later.
-- **Reproducibility**: pass `--db <some-file>.db` for any run you might want to inspect later. Use the in-memory default for quick experiments.
+- **API budget**: each phase asks every agent once. With 4 agents and 20 cycles, that's ~80 OpenRouter calls per market. Cost depends on the models you pick. In live mode, multiply by the number of simultaneous markets.
+- **Smoke testing**: set `phase_duration_seconds: 10` in `markets.yaml` and `num_cycles: 3` for quick validation. Switch to 1800 (30 min) or higher for production runs.
+- **Adding a market mid-run**: add a new entry to `markets.yaml` and restart `run_markets.py`. The new market joins at the next tick; existing markets resume seamlessly from the DB.
+- **Bad model responses**: if an LLM returns malformed JSON, the error prints inline, that agent skips the cycle, and the run continues. In demo mode, the broken response still lands in `episode_traces.json` so you can debug it later.
+- **Dashboard after code updates**: if you pull new code that changes model dataclasses, restart the dashboard server (`python3 dashboard/server.py ...`) so it reimports the updated classes.

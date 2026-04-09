@@ -28,22 +28,24 @@ import { Badge, Card, SectionHeader } from "./ui";
 export function PerformanceMetrics({
   episode,
   dataVersion,
+  marketId,
 }: {
   episode: Episode;
   dataVersion: number;
+  marketId?: string | null;
 }) {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [positions, setPositions] = useState<PositionsResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([api.metrics(), api.positions()])
+    Promise.all([api.metrics(marketId), api.positions(marketId)])
       .then(([m, p]) => {
         setMetrics(m);
         setPositions(p);
       })
       .catch((e) => setErr(e?.message || String(e)));
-  }, [dataVersion]);
+  }, [dataVersion, marketId]);
 
   const mmAccounts = useMemo(
     () => episode.accounts.filter((a) => a.role === "MM").map((a) => a.id),

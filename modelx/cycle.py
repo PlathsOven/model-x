@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .db import (
     connect,
+    delete_cycle_data,
     get_cycle_state,
     insert_fill,
     insert_order,
@@ -67,6 +68,11 @@ def open_cycle(
         db = connect(":memory:")
 
     cid = cycle_id or f"{contract.id}:{cycle_index}"
+
+    # Clean up any stale data from a previously interrupted run that left
+    # orphaned fills/orders/quotes for this cycle_id.
+    delete_cycle_data(db, cid)
+
     state = CycleState(
         id=cid,
         contract_id=contract.id,

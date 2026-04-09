@@ -6,6 +6,8 @@ import type {
   CycleRow,
   Episode,
   FillRow,
+  LifetimeMetrics,
+  MarketSummary,
   Metrics,
   OrderRow,
   Orderbook,
@@ -29,40 +31,65 @@ async function postJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+// Helper: append market_id query string when provided.
+function withMarket(url: string, marketId?: string | null): string {
+  if (!marketId) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}market_id=${encodeURIComponent(marketId)}`;
+}
+
 export const api = {
-  episode: () => getJson<Episode>("/api/episode"),
-  cycles: () => getJson<CycleRow[]>("/api/cycles"),
-  fills: (opts?: {
-    agent?: string;
-    phase?: "MM" | "HF";
-    cycleMin?: number;
-    cycleMax?: number;
-  }) => {
+  markets: () => getJson<MarketSummary[]>("/api/markets"),
+  episode: (marketId?: string | null) =>
+    getJson<Episode>(withMarket("/api/episode", marketId)),
+  cycles: (marketId?: string | null) =>
+    getJson<CycleRow[]>(withMarket("/api/cycles", marketId)),
+  fills: (
+    opts?: {
+      agent?: string;
+      phase?: "MM" | "HF";
+      cycleMin?: number;
+      cycleMax?: number;
+    },
+    marketId?: string | null
+  ) => {
     const qs = new URLSearchParams();
     if (opts?.agent) qs.set("agent", opts.agent);
     if (opts?.phase) qs.set("phase", opts.phase);
     if (opts?.cycleMin !== undefined) qs.set("cycle_min", String(opts.cycleMin));
     if (opts?.cycleMax !== undefined) qs.set("cycle_max", String(opts.cycleMax));
     const q = qs.toString();
-    return getJson<FillRow[]>(`/api/fills${q ? `?${q}` : ""}`);
+    return getJson<FillRow[]>(
+      withMarket(`/api/fills${q ? `?${q}` : ""}`, marketId)
+    );
   },
-  quotes: (cycleIndex?: number) =>
+  quotes: (cycleIndex?: number, marketId?: string | null) =>
     getJson<QuoteRow[]>(
-      `/api/quotes${cycleIndex !== undefined ? `?cycle_index=${cycleIndex}` : ""}`
+      withMarket(
+        `/api/quotes${cycleIndex !== undefined ? `?cycle_index=${cycleIndex}` : ""}`,
+        marketId
+      )
     ),
-  orders: (cycleIndex?: number) =>
+  orders: (cycleIndex?: number, marketId?: string | null) =>
     getJson<OrderRow[]>(
-      `/api/orders${cycleIndex !== undefined ? `?cycle_index=${cycleIndex}` : ""}`
+      withMarket(
+        `/api/orders${cycleIndex !== undefined ? `?cycle_index=${cycleIndex}` : ""}`,
+        marketId
+      )
     ),
-  orderbook: (cycleIndex: number) =>
-    getJson<Orderbook>(`/api/orderbook/${cycleIndex}`),
+  orderbook: (cycleIndex: number, marketId?: string | null) =>
+    getJson<Orderbook>(withMarket(`/api/orderbook/${cycleIndex}`, marketId)),
   traces: () => getJson<AllTraces>("/api/traces"),
   agentTraces: (agent: string) =>
     getJson<AgentTraces & { account_id: string }>(
       `/api/traces/${encodeURIComponent(agent)}`
     ),
-  metrics: () => getJson<Metrics>("/api/metrics"),
-  positions: () => getJson<PositionsResponse>("/api/positions"),
-  timeseries: () => getJson<Timeseries>("/api/timeseries"),
+  metrics: (marketId?: string | null) =>
+    getJson<Metrics>(withMarket("/api/metrics", marketId)),
+  metricsLifetime: () => getJson<LifetimeMetrics>("/api/metrics/lifetime"),
+  positions: (marketId?: string | null) =>
+    getJson<PositionsResponse>(withMarket("/api/positions", marketId)),
+  timeseries: (marketId?: string | null) =>
+    getJson<Timeseries>(withMarket("/api/timeseries", marketId)),
   reload: () => postJson<{ ok: boolean }>("/api/reload"),
 };

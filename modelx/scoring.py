@@ -5,13 +5,19 @@ Two entry points: `score_mm` and `score_hf`. Each returns a dict
 the runner. MMs are discovered from submitted quotes; HFs from submitted
 orders. The contract must have `settlement_value` set — otherwise the
 functions raise ValueError.
+
+Lifetime scoring (`score_lifetime` / `list_lifetime_by_account`) aggregates
+across multiple settled markets by reading rows from `agent_lifetime_stats`,
+which `settle.py` writes one per (account, market) when a market settles.
 """
 
+import sqlite3
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .cycle import Cycle
-from .models import Contract, Fill
+from .db import list_lifetime_stats
+from .models import Contract, Fill, LifetimeStat
 
 
 @dataclass
@@ -303,3 +309,93 @@ def _self_crosses(fills: List[Fill], account_id: str) -> Tuple[int, int]:
             count += 1
             volume += f.size
     return count, volume
+
+
+# ---------- lifetime aggregation ----------
+
+@dataclass
+class LifetimeScores:
+    """Aggregate stats for one agent across every market they've settled in."""
+    account_id: str
+    name: str  # short display name (without market_id prefix)
+    markets_traded: int
+    total_pnl: float
+    total_volume: int
+    avg_sharpe: float       # mean of per-market sharpes (skips Nones)
+    best_market_pnl: float  # 0.0 if no settled markets
+    worst_market_pnl: float
+    per_market: List[LifetimeStat]
+
+
+def score_lifetime(
+    conn: sqlite3.Connection,
+    account_id: str,
+) -> LifetimeScores:
+    """Aggregate `agent_lifetime_stats` rows for one account into a single
+    `LifetimeScores`. Returns empty/zero values if the account has no
+    settled-market rows yet."""
+    rows = list_lifetime_stats(conn, account_id=account_id)
+    name = _strip_market_prefix(account_id)
+    if not rows:
+        return LifetimeScores(
+            account_id=account_id, name=name,
+            markets_traded=0, total_pnl=0.0, total_volume=0,
+            avg_sharpe=0.0, best_market_pnl=0.0, worst_market_pnl=0.0,
+            per_market=[],
+        )
+    pnls = [r.total_pnl or 0.0 for r in rows]
+    sharpes = [r.sharpe for r in rows if r.sharpe is not None]
+    return LifetimeScores(
+        account_id=account_id,
+        name=name,
+        markets_traded=len(rows),
+        total_pnl=sum(pnls),
+        total_volume=sum(r.volume or 0 for r in rows),
+        avg_sharpe=sum(sharpes) / len(sharpes) if sharpes else 0.0,
+        best_market_pnl=max(pnls),
+        worst_market_pnl=min(pnls),
+        per_market=rows,
+    )
+
+
+def list_lifetime_by_name(
+    conn: sqlite3.Connection,
+) -> Dict[str, LifetimeScores]:
+    """Return lifetime scores for every agent across all settled markets,
+    keyed by short agent name (with the per-market account_id prefix stripped).
+
+    When the same agent participates in multiple markets, their per-market
+    rows are combined into a single LifetimeScores entry. This is what the
+    dashboard's Lifetime tab consumes — it shows agents, not market-scoped
+    accounts.
+    """
+    all_rows = list_lifetime_stats(conn)
+    grouped: Dict[str, List[LifetimeStat]] = {}
+    for r in all_rows:
+        name = _strip_market_prefix(r.account_id)
+        grouped.setdefault(name, []).append(r)
+
+    out: Dict[str, LifetimeScores] = {}
+    for name, rows in grouped.items():
+        pnls = [r.total_pnl or 0.0 for r in rows]
+        sharpes = [r.sharpe for r in rows if r.sharpe is not None]
+        out[name] = LifetimeScores(
+            account_id=name,  # use short name as the canonical key
+            name=name,
+            markets_traded=len(rows),
+            total_pnl=sum(pnls),
+            total_volume=sum(r.volume or 0 for r in rows),
+            avg_sharpe=sum(sharpes) / len(sharpes) if sharpes else 0.0,
+            best_market_pnl=max(pnls),
+            worst_market_pnl=min(pnls),
+            per_market=rows,
+        )
+    return out
+
+
+def _strip_market_prefix(account_id: str) -> str:
+    """`{market_id}:{agent_name}` -> `{agent_name}`. Returns input unchanged
+    if there's no colon (legacy / single-market accounts)."""
+    if ":" in account_id:
+        return account_id.split(":", 1)[1]
+    return account_id

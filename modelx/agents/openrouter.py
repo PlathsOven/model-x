@@ -6,8 +6,11 @@ without httpx installed.
 """
 
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 from ..matching import BookLevel
 from ..models import Order, Quote
@@ -107,29 +110,65 @@ class OpenRouterAgent(Agent):
 
     # ---- HTTP ----
 
+    def _request_args(self, system_prompt: str) -> Dict[str, Any]:
+        """Build the headers/body shared by sync and async call paths."""
+        return {
+            "headers": {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            "json": {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Submit your decision now."},
+                ],
+            },
+            "timeout": self.timeout,
+        }
+
     def _call(self, system_prompt: str) -> str:
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        body = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "Submit your decision now."},
-            ],
-        }
+        args = self._request_args(system_prompt)
         if self._client is not None:
-            resp = self._client.post(
-                OPENROUTER_URL, headers=headers, json=body, timeout=self.timeout,
-            )
+            resp = self._client.post(OPENROUTER_URL, **args)
         else:
             import httpx  # lazy: only required for real network calls
-            resp = httpx.post(
-                OPENROUTER_URL, headers=headers, json=body, timeout=self.timeout,
-            )
+            resp = httpx.post(OPENROUTER_URL, **args)
         resp.raise_for_status()
         data = resp.json()
+        if "choices" not in data:
+            log.error("OpenRouter response missing 'choices' for model=%s: %s",
+                      self.model, json.dumps(data)[:2000])
+            raise ValueError(
+                f"OpenRouter response missing 'choices' for model {self.model}. "
+                f"Response: {json.dumps(data)[:500]}"
+            )
+        return data["choices"][0]["message"]["content"]
+
+    async def _call_async(self, system_prompt: str) -> str:
+        """Async variant — opens a per-call AsyncClient so the live scheduler
+        can hit many models in parallel without blocking the event loop."""
+        args = self._request_args(system_prompt)
+        if self._client is not None and hasattr(self._client, "post_async"):
+            # Test injection point: a fake client may expose `post_async`.
+            resp = await self._client.post_async(OPENROUTER_URL, **args)
+        else:
+            import httpx
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(
+                    OPENROUTER_URL,
+                    headers=args["headers"],
+                    json=args["json"],
+                )
+        resp.raise_for_status()
+        data = resp.json()
+        if "choices" not in data:
+            log.error("OpenRouter response missing 'choices' for model=%s: %s",
+                      self.model, json.dumps(data)[:2000])
+            raise ValueError(
+                f"OpenRouter response missing 'choices' for model {self.model}. "
+                f"Response: {json.dumps(data)[:500]}"
+            )
         return data["choices"][0]["message"]["content"]
 
     # ---- Agent interface ----
@@ -157,8 +196,8 @@ class OpenRouterAgent(Agent):
             "error": error,
         })
 
-    def get_quote(self, ctx: AgentContext) -> Optional[Quote]:
-        prompt = MM_SYSTEM_PROMPT.format(
+    def _build_mm_prompt(self, ctx: AgentContext) -> str:
+        return MM_SYSTEM_PROMPT.format(
             position_limit=ctx.position_limit,
             max_size=ctx.max_size,
             contract_question=ctx.contract.description,
@@ -171,40 +210,9 @@ class OpenRouterAgent(Agent):
             trade_history=ctx.trade_history,
             information_log=ctx.information_log,
         )
-        raw_response: Optional[str] = None
-        parsed: Optional[Dict[str, Any]] = None
-        try:
-            raw_response = self._call(prompt)
-            parsed = parse_response(raw_response)
-            quote = Quote(
-                id=f"{ctx.cycle_id}:{ctx.account_id}:q",
-                cycle_id=ctx.cycle_id,
-                contract_id=ctx.contract.id,
-                account_id=ctx.account_id,
-                bid_price=to_float(parsed.get("bid_price")),
-                bid_size=to_int(parsed.get("bid_size")),
-                ask_price=to_float(parsed.get("ask_price")),
-                ask_size=to_int(parsed.get("ask_size")),
-            )
-            self._record(
-                "MM", ctx, prompt, raw_response, parsed,
-                decision={
-                    "bid_price": quote.bid_price,
-                    "bid_size": quote.bid_size,
-                    "ask_price": quote.ask_price,
-                    "ask_size": quote.ask_size,
-                },
-            )
-            return quote
-        except Exception as e:
-            self._record(
-                "MM", ctx, prompt, raw_response, parsed,
-                error=f"{type(e).__name__}: {e}",
-            )
-            raise
 
-    def get_order(self, ctx: AgentContext, book: List[BookLevel]) -> Optional[Order]:
-        prompt = HF_SYSTEM_PROMPT.format(
+    def _build_hf_prompt(self, ctx: AgentContext, book: List[BookLevel]) -> str:
+        return HF_SYSTEM_PROMPT.format(
             position_limit=ctx.position_limit,
             max_size=ctx.max_size,
             contract_question=ctx.contract.description,
@@ -218,35 +226,116 @@ class OpenRouterAgent(Agent):
             information_log=ctx.information_log,
             order_book=format_book(book),
         )
+
+    def _parse_quote(
+        self,
+        ctx: AgentContext,
+        prompt: str,
+        raw_response: str,
+    ) -> Quote:
+        parsed = parse_response(raw_response)
+        quote = Quote(
+            id=f"{ctx.cycle_id}:{ctx.account_id}:q",
+            cycle_id=ctx.cycle_id,
+            contract_id=ctx.contract.id,
+            account_id=ctx.account_id,
+            bid_price=to_float(parsed.get("bid_price")),
+            bid_size=to_int(parsed.get("bid_size")),
+            ask_price=to_float(parsed.get("ask_price")),
+            ask_size=to_int(parsed.get("ask_size")),
+        )
+        self._record(
+            "MM", ctx, prompt, raw_response, parsed,
+            decision={
+                "bid_price": quote.bid_price,
+                "bid_size": quote.bid_size,
+                "ask_price": quote.ask_price,
+                "ask_size": quote.ask_size,
+            },
+        )
+        return quote
+
+    def _parse_order(
+        self,
+        ctx: AgentContext,
+        prompt: str,
+        raw_response: str,
+    ) -> Optional[Order]:
+        parsed = parse_response(raw_response)
+        side = str(parsed.get("side", "pass")).strip().lower()
+        size = to_int(parsed.get("size"))
+        if side == "pass" or side not in ("buy", "sell") or size <= 0:
+            self._record(
+                "HF", ctx, prompt, raw_response, parsed,
+                decision={"side": "pass", "size": 0},
+            )
+            return None
+        order = Order(
+            id=f"{ctx.cycle_id}:{ctx.account_id}:o",
+            cycle_id=ctx.cycle_id,
+            contract_id=ctx.contract.id,
+            account_id=ctx.account_id,
+            side=side,
+            size=size,
+        )
+        self._record(
+            "HF", ctx, prompt, raw_response, parsed,
+            decision={"side": order.side, "size": order.size},
+        )
+        return order
+
+    def get_quote(self, ctx: AgentContext) -> Optional[Quote]:
+        prompt = self._build_mm_prompt(ctx)
         raw_response: Optional[str] = None
-        parsed: Optional[Dict[str, Any]] = None
         try:
             raw_response = self._call(prompt)
-            parsed = parse_response(raw_response)
-            side = str(parsed.get("side", "pass")).strip().lower()
-            size = to_int(parsed.get("size"))
-            if side == "pass" or side not in ("buy", "sell") or size <= 0:
-                self._record(
-                    "HF", ctx, prompt, raw_response, parsed,
-                    decision={"side": "pass", "size": 0},
-                )
-                return None
-            order = Order(
-                id=f"{ctx.cycle_id}:{ctx.account_id}:o",
-                cycle_id=ctx.cycle_id,
-                contract_id=ctx.contract.id,
-                account_id=ctx.account_id,
-                side=side,
-                size=size,
-            )
-            self._record(
-                "HF", ctx, prompt, raw_response, parsed,
-                decision={"side": order.side, "size": order.size},
-            )
-            return order
+            return self._parse_quote(ctx, prompt, raw_response)
         except Exception as e:
             self._record(
-                "HF", ctx, prompt, raw_response, parsed,
+                "MM", ctx, prompt, raw_response, None,
+                error=f"{type(e).__name__}: {e}",
+            )
+            raise
+
+    def get_order(self, ctx: AgentContext, book: List[BookLevel]) -> Optional[Order]:
+        prompt = self._build_hf_prompt(ctx, book)
+        raw_response: Optional[str] = None
+        try:
+            raw_response = self._call(prompt)
+            return self._parse_order(ctx, prompt, raw_response)
+        except Exception as e:
+            self._record(
+                "HF", ctx, prompt, raw_response, None,
+                error=f"{type(e).__name__}: {e}",
+            )
+            raise
+
+    async def get_quote_async(self, ctx: AgentContext) -> Optional[Quote]:
+        prompt = self._build_mm_prompt(ctx)
+        raw_response: Optional[str] = None
+        try:
+            raw_response = await self._call_async(prompt)
+            return self._parse_quote(ctx, prompt, raw_response)
+        except Exception as e:
+            self._record(
+                "MM", ctx, prompt, raw_response, None,
+                error=f"{type(e).__name__}: {e}",
+            )
+            raise
+
+    async def get_order_async(
+        self,
+        ctx: AgentContext,
+        book: List[BookLevel],
+    ) -> Optional[Order]:
+        prompt = self._build_hf_prompt(ctx, book)
+        raw_response: Optional[str] = None
+        try:
+            raw_response = await self._call_async(prompt)
+            return self._parse_order(ctx, prompt, raw_response)
+        except Exception as e:
+            self._record(
+                "HF", ctx, prompt, raw_response, None,
                 error=f"{type(e).__name__}: {e}",
             )
             raise

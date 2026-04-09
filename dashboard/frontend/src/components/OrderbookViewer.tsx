@@ -9,10 +9,12 @@ export function OrderbookViewer({
   episode,
   dataVersion,
   initialCycle = 0,
+  marketId,
 }: {
   episode: Episode;
   dataVersion: number;
   initialCycle?: number;
+  marketId?: string | null;
 }) {
   const lastCycle = Math.max(0, episode.num_cycles - 1);
   const [cycle, setCycle] = useState<number>(
@@ -31,10 +33,10 @@ export function OrderbookViewer({
     }
     setErr(null);
     api
-      .orderbook(cycle)
+      .orderbook(cycle, marketId)
       .then(setOb)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [cycle, dataVersion, episode.num_cycles]);
+  }, [cycle, dataVersion, episode.num_cycles, marketId]);
 
   // Auto-clamp cycle if the dataset shrank under us (e.g. user pointed at
   // a different db that has fewer cycles).
