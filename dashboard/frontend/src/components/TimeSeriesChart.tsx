@@ -35,10 +35,12 @@ interface LayerToggles {
 
 export function TimeSeriesChart({
   episode,
+  dataVersion,
   focusCycle,
   onClearFocus,
 }: {
   episode: Episode;
+  dataVersion: number;
   focusCycle: number | null;
   onClearFocus: () => void;
 }) {
@@ -61,7 +63,7 @@ export function TimeSeriesChart({
       .timeseries()
       .then(setTs)
       .catch((e) => setErr(e?.message || String(e)));
-  }, []);
+  }, [dataVersion]);
 
   const agentColors = useMemo(() => {
     if (!ts) return {};
@@ -179,7 +181,7 @@ export function TimeSeriesChart({
               <XAxis
                 dataKey="cycle"
                 type="number"
-                domain={[0, episode.num_cycles - 1]}
+                domain={[0, Math.max(0, episode.num_cycles - 1)]}
                 allowDecimals={false}
                 stroke={AXIS_COLOR}
                 tick={{ fill: AXIS_COLOR, fontSize: 11 }}

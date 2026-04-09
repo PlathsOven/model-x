@@ -26,14 +26,23 @@ export interface EpisodeStats {
   hf_fills: number;
 }
 
+export type EpisodeStatus = "ok" | "db_missing" | "no_contracts" | "error";
+
 export interface Episode {
-  contract: ContractInfo;
+  contract: ContractInfo | null;
   num_cycles: number;
   settled: boolean;
   accounts: AccountSummary[];
   stats: EpisodeStats;
   traces_loaded: boolean;
   sources: { db_path: string; traces_path: string };
+  // Live-update status fields populated by /api/episode on every poll.
+  loaded: boolean;
+  status: EpisodeStatus;
+  status_detail: string | null;
+  loaded_at: number;
+  db_mtime: number;
+  traces_mtime: number;
 }
 
 export interface CycleRow {

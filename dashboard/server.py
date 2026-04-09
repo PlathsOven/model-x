@@ -13,6 +13,9 @@ import json
 import os
 import sqlite3
 import sys
+import threading
+import time
+import traceback
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -62,95 +65,217 @@ CONFIG: Config = Config(db_path="modelx.db", traces_path="episode_traces.json", 
 
 @dataclass
 class AppState:
-    """Everything the dashboard needs, loaded once from disk."""
-    contract: Contract
-    accounts: List[Account]
-    cycle_states: List[CycleState]
-    cycles: List[Cycle]
-    all_fills: List[Fill]
-    positions: Dict[str, int]
-    marks: List[float]
+    """Everything the dashboard needs, loaded from disk and refreshed on
+    file-mtime change. All data fields default to empty so a state can
+    represent "no data yet" without crashing endpoints."""
+    contract: Optional[Contract] = None
+    accounts: List[Account] = field(default_factory=list)
+    cycle_states: List[CycleState] = field(default_factory=list)
+    cycles: List[Cycle] = field(default_factory=list)
+    all_fills: List[Fill] = field(default_factory=list)
+    positions: Dict[str, int] = field(default_factory=dict)
+    marks: List[float] = field(default_factory=list)
     residual_books: Dict[int, List[BookLevel]] = field(default_factory=dict)
     traces: Optional[Dict[str, Any]] = None
     traces_loaded: bool = False
     db_path: str = ""
     traces_path: str = ""
+    # Loading status — frontend uses these to render waiting / live screens.
+    loaded: bool = False
+    status: str = "db_missing"  # "ok" | "db_missing" | "no_contracts" | "error"
+    status_detail: Optional[str] = None
+    db_mtime: float = 0.0
+    traces_mtime: float = 0.0
+    loaded_at: float = 0.0  # epoch seconds; bumps on every successful reload
 
 
 STATE: Optional[AppState] = None
+_RELOAD_LOCK = threading.Lock()
 
 
-def _load_state(db_path: str, traces_path: str) -> AppState:
-    """Open the db, pick the first contract, rebuild cycles, load traces."""
-    if not os.path.exists(db_path):
-        raise FileNotFoundError(f"db not found: {db_path}")
+def _file_mtime(path: str) -> float:
+    """0.0 if path doesn't exist; mtime otherwise. Used as a cheap change check."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
 
-    conn = connect(db_path)
 
-    # Pick the single contract in the db (run_demo.py only writes one).
-    row = conn.execute(
-        "SELECT id FROM contracts ORDER BY created_at, id LIMIT 1"
-    ).fetchone()
-    if row is None:
-        raise RuntimeError(f"no contracts found in {db_path}")
-    contract = get_contract(conn, row["id"])
-    if contract is None:
-        raise RuntimeError(f"contract {row['id']} disappeared after initial lookup")
-
-    accounts = list_accounts(conn)
-    cycle_states = list_cycle_states(conn, contract.id)
-
-    # Reconstruct full Cycle objects so we can call score_mm/score_hf.
-    cycles: List[Cycle] = [load_cycle(conn, contract, cs.id) for cs in cycle_states]
-
-    all_fills = list_fills_by_contract(conn, contract.id)
-    positions = positions_for_contract(conn, contract.id)
-    marks = _carry_mark_forward(cycles)
-
-    # For every cycle, derive the residual book the HFs saw — always recompute,
-    # never trust load_cycle's conditional population.
-    residual_books: Dict[int, List[BookLevel]] = {}
-    for cs, cyc in zip(cycle_states, cycles):
-        entering = positions_before_cycle(conn, contract.id, cs.cycle_index)
-        _, book, _ = match_mm_phase(
-            cyc.quotes,
-            cycle_id=cs.id,
-            contract_id=contract.id,
-            positions=entering,
-        )
-        residual_books[cs.cycle_index] = book
-
-    # Traces are optional — the db may exist without a traces file (e.g. if the
-    # user ran the demo to another path, or if the run crashed before dump).
-    traces: Optional[Dict[str, Any]] = None
-    traces_loaded = False
-    if traces_path and os.path.exists(traces_path):
-        with open(traces_path) as f:
-            traces = json.load(f)
-        traces_loaded = True
-
-    conn.close()
-
+def _empty_state(
+    db_path: str,
+    traces_path: str,
+    status: str,
+    detail: Optional[str] = None,
+    db_mtime: float = 0.0,
+    traces_mtime: float = 0.0,
+) -> AppState:
+    """Build a sentinel state with empty data for the unloaded case."""
     return AppState(
-        contract=contract,
-        accounts=accounts,
-        cycle_states=cycle_states,
-        cycles=cycles,
-        all_fills=all_fills,
-        positions=positions,
-        marks=marks,
-        residual_books=residual_books,
-        traces=traces,
-        traces_loaded=traces_loaded,
         db_path=db_path,
         traces_path=traces_path,
+        loaded=False,
+        status=status,
+        status_detail=detail,
+        db_mtime=db_mtime,
+        traces_mtime=traces_mtime,
+        loaded_at=time.time(),
     )
 
 
+def _load_traces(traces_path: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """Read the traces JSON if it exists. Returns (parsed, loaded_flag).
+    Failures (malformed JSON, partial write) are swallowed and treated as
+    'not loaded' so the rest of the dashboard still works."""
+    if not traces_path or not os.path.exists(traces_path):
+        return None, False
+    try:
+        with open(traces_path) as f:
+            return json.load(f), True
+    except (OSError, ValueError):
+        return None, False
+
+
+def _load_state(db_path: str, traces_path: str) -> AppState:
+    """Open the db, pick the first contract, rebuild cycles, load traces.
+
+    Never raises. On any failure (missing db, no contracts, malformed db,
+    etc.) returns a sentinel AppState with `loaded=False` and a `status`
+    that the frontend renders as a friendly waiting screen.
+    """
+    db_mtime = _file_mtime(db_path)
+    traces_mtime = _file_mtime(traces_path)
+
+    if not os.path.exists(db_path):
+        return _empty_state(
+            db_path, traces_path,
+            status="db_missing",
+            detail=f"db file not found at {db_path}",
+            db_mtime=db_mtime,
+            traces_mtime=traces_mtime,
+        )
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = connect(db_path)
+
+        # Pick the single contract in the db (run_demo.py only writes one).
+        row = conn.execute(
+            "SELECT id FROM contracts ORDER BY created_at, id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            # Traces may still load even if the db has no contracts yet — keep
+            # the partial info for the Reasoning view if the user previously
+            # generated traces against a different db path.
+            traces, traces_loaded = _load_traces(traces_path)
+            return AppState(
+                db_path=db_path,
+                traces_path=traces_path,
+                loaded=False,
+                status="no_contracts",
+                status_detail="db exists but contains no contracts yet",
+                db_mtime=db_mtime,
+                traces_mtime=traces_mtime,
+                loaded_at=time.time(),
+                traces=traces,
+                traces_loaded=traces_loaded,
+            )
+
+        contract = get_contract(conn, row["id"])
+        if contract is None:
+            return _empty_state(
+                db_path, traces_path,
+                status="error",
+                detail=f"contract {row['id']} disappeared after initial lookup",
+                db_mtime=db_mtime,
+                traces_mtime=traces_mtime,
+            )
+
+        accounts = list_accounts(conn)
+        cycle_states = list_cycle_states(conn, contract.id)
+
+        # Reconstruct full Cycle objects so we can call score_mm/score_hf.
+        cycles: List[Cycle] = [
+            load_cycle(conn, contract, cs.id) for cs in cycle_states
+        ]
+
+        all_fills = list_fills_by_contract(conn, contract.id)
+        positions = positions_for_contract(conn, contract.id)
+        marks = _carry_mark_forward(cycles) if cycles else []
+
+        # For every cycle, derive the residual book the HFs saw — always
+        # recompute, never trust load_cycle's conditional population.
+        residual_books: Dict[int, List[BookLevel]] = {}
+        for cs, cyc in zip(cycle_states, cycles):
+            entering = positions_before_cycle(conn, contract.id, cs.cycle_index)
+            _, book, _ = match_mm_phase(
+                cyc.quotes,
+                cycle_id=cs.id,
+                contract_id=contract.id,
+                positions=entering,
+            )
+            residual_books[cs.cycle_index] = book
+
+        traces, traces_loaded = _load_traces(traces_path)
+
+        return AppState(
+            contract=contract,
+            accounts=accounts,
+            cycle_states=cycle_states,
+            cycles=cycles,
+            all_fills=all_fills,
+            positions=positions,
+            marks=marks,
+            residual_books=residual_books,
+            traces=traces,
+            traces_loaded=traces_loaded,
+            db_path=db_path,
+            traces_path=traces_path,
+            loaded=True,
+            status="ok",
+            status_detail=None,
+            db_mtime=db_mtime,
+            traces_mtime=traces_mtime,
+            loaded_at=time.time(),
+        )
+    except Exception as e:
+        # Any unexpected failure (corrupt db, missing schema, partial write
+        # mid-commit, etc.) — surface as an error sentinel rather than crash.
+        traceback.print_exc()
+        return _empty_state(
+            db_path, traces_path,
+            status="error",
+            detail=f"{type(e).__name__}: {e}",
+            db_mtime=db_mtime,
+            traces_mtime=traces_mtime,
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _state() -> AppState:
-    if STATE is None:
-        raise HTTPException(status_code=503, detail="dashboard state not loaded")
-    return STATE
+    """Return the current state, reloading from disk if file mtimes have
+    changed. Called by every endpoint — the mtime check short-circuits in
+    microseconds when nothing has changed."""
+    global STATE
+    db_mtime = _file_mtime(CONFIG.db_path)
+    traces_mtime = _file_mtime(CONFIG.traces_path)
+    if (
+        STATE is None
+        or db_mtime != STATE.db_mtime
+        or traces_mtime != STATE.traces_mtime
+    ):
+        with _RELOAD_LOCK:
+            # Re-check inside the lock so concurrent requests don't all reload.
+            db_mtime = _file_mtime(CONFIG.db_path)
+            traces_mtime = _file_mtime(CONFIG.traces_path)
+            if (
+                STATE is None
+                or db_mtime != STATE.db_mtime
+                or traces_mtime != STATE.traces_mtime
+            ):
+                STATE = _load_state(CONFIG.db_path, CONFIG.traces_path)
+    return STATE  # type: ignore[return-value]
 
 
 # ---------- serialization helpers ----------
@@ -396,8 +521,16 @@ def _positions_series(state: AppState) -> Dict[str, List[dict]]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Initial state load. _load_state never raises, so a missing or empty
+    db is non-fatal — the server starts with a sentinel state and the
+    frontend renders a 'waiting for data' screen until files appear."""
     global STATE
     STATE = _load_state(CONFIG.db_path, CONFIG.traces_path)
+    print(
+        f"[dashboard] initial state: status={STATE.status} "
+        f"db={CONFIG.db_path} traces={CONFIG.traces_path}",
+        flush=True,
+    )
     yield
 
 
@@ -415,11 +548,43 @@ app.add_middleware(
 
 # ---------- routes ----------
 
+def _status_envelope(state: AppState) -> dict:
+    """Common status fields included in /api/episode regardless of load state."""
+    return {
+        "loaded": state.loaded,
+        "status": state.status,
+        "status_detail": state.status_detail,
+        "loaded_at": state.loaded_at,
+        "db_mtime": state.db_mtime,
+        "traces_mtime": state.traces_mtime,
+        "traces_loaded": state.traces_loaded,
+        "sources": {
+            "db_path": state.db_path,
+            "traces_path": state.traces_path,
+        },
+    }
+
+
 @app.get("/api/episode")
 def episode():
     state = _state()
-    cycle_ids = {cs.id for cs in state.cycle_states}
-    cycle_index_by_id = {cs.id: cs.cycle_index for cs in state.cycle_states}
+
+    # Unloaded path: return a minimal but well-shaped payload so the frontend
+    # can render its waiting screen without crashing on null derefs.
+    if not state.loaded or state.contract is None:
+        return {
+            "contract": None,
+            "num_cycles": 0,
+            "settled": False,
+            "accounts": [],
+            "stats": {
+                "total_fills": 0,
+                "total_volume": 0,
+                "mm_fills": 0,
+                "hf_fills": 0,
+            },
+            **_status_envelope(state),
+        }
 
     # Final per-account PnL (mark-to-market with carried-forward final mark)
     pos_series = _positions_series(state)
@@ -477,11 +642,7 @@ def episode():
             "mm_fills": mm_fills,
             "hf_fills": hf_fills,
         },
-        "traces_loaded": state.traces_loaded,
-        "sources": {
-            "db_path": state.db_path,
-            "traces_path": state.traces_path,
-        },
+        **_status_envelope(state),
     }
 
 
@@ -565,6 +726,10 @@ def orders(cycle_index: Optional[int] = None):
 @app.get("/api/orderbook/{cycle_index}")
 def orderbook(cycle_index: int):
     state = _state()
+    if not state.loaded:
+        raise HTTPException(
+            status_code=404, detail=f"no cycles loaded yet (status={state.status})"
+        )
     if cycle_index < 0 or cycle_index >= len(state.cycle_states):
         raise HTTPException(status_code=404, detail=f"no cycle with index {cycle_index}")
 
@@ -646,12 +811,16 @@ def traces_for_agent(agent_id: str):
 @app.get("/api/metrics")
 def metrics():
     state = _state()
+    if not state.loaded or state.contract is None or not state.cycles:
+        return {"settled": False, "mm": {}, "hf": {}}
     return _compute_scores_safe(state)
 
 
 @app.get("/api/positions")
 def positions():
     state = _state()
+    if not state.loaded or state.contract is None:
+        return {"agents": {}}
     return {"agents": _positions_series(state)}
 
 
@@ -659,6 +828,16 @@ def positions():
 def timeseries():
     """Precomposed payload for the hero chart."""
     state = _state()
+    if not state.loaded or state.contract is None:
+        return {
+            "cycles": [],
+            "fills": [],
+            "settlement": None,
+            "info_cycles": [],
+            "info_by_cycle": {},
+            "mm_accounts": [],
+            "hf_accounts": [],
+        }
     info_by_cycle = _info_by_cycle(state)
     fv_by_agent = _fair_values_by_cycle(state)
     cycle_index_by_id = {cs.id: cs.cycle_index for cs in state.cycle_states}
@@ -719,9 +898,18 @@ def timeseries():
 
 @app.post("/api/reload")
 def reload_state():
+    """Force a reload regardless of mtime — useful for cases where the file
+    was atomically replaced and the mtime didn't change, or when the user
+    wants to be certain the dashboard is showing the latest data."""
     global STATE
-    STATE = _load_state(CONFIG.db_path, CONFIG.traces_path)
-    return {"ok": True}
+    with _RELOAD_LOCK:
+        STATE = _load_state(CONFIG.db_path, CONFIG.traces_path)
+    return {
+        "ok": True,
+        "loaded": STATE.loaded,
+        "status": STATE.status,
+        "loaded_at": STATE.loaded_at,
+    }
 
 
 # ---------- entrypoint ----------

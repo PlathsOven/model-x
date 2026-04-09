@@ -4,7 +4,13 @@ import type { CycleRow, Episode } from "../types";
 import { fmtInt, fmtPnl, pnlClass } from "../lib/format";
 import { Card, RoleBadge, SectionHeader, StatPill } from "./ui";
 
-export function EpisodeOverview({ episode }: { episode: Episode }) {
+export function EpisodeOverview({
+  episode,
+  dataVersion,
+}: {
+  episode: Episode;
+  dataVersion: number;
+}) {
   const [cycles, setCycles] = useState<CycleRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
@@ -13,9 +19,16 @@ export function EpisodeOverview({ episode }: { episode: Episode }) {
       .cycles()
       .then(setCycles)
       .catch((e) => setErr(e?.message || String(e)));
-  }, []);
+  }, [dataVersion]);
 
   const { contract, stats, accounts, settled, num_cycles } = episode;
+
+  // App.tsx guards episode.loaded, so contract should always be non-null
+  // here. Defensive bail-out for type safety.
+  if (!contract) {
+    return null;
+  }
+
   const mmCount = accounts.filter((a) => a.role === "MM").length;
   const hfCount = accounts.filter((a) => a.role === "HF").length;
 

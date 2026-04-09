@@ -3,31 +3,63 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { api } from "../api";
 import type { Episode, Orderbook } from "../types";
 import { fmtInt, fmtPrice } from "../lib/format";
-import { Badge, Card, SectionHeader } from "./ui";
+import { Badge, Card, EmptyState, SectionHeader } from "./ui";
 
 export function OrderbookViewer({
   episode,
+  dataVersion,
   initialCycle = 0,
 }: {
   episode: Episode;
+  dataVersion: number;
   initialCycle?: number;
 }) {
+  const lastCycle = Math.max(0, episode.num_cycles - 1);
   const [cycle, setCycle] = useState<number>(
-    Math.max(0, Math.min(initialCycle, episode.num_cycles - 1))
+    Math.max(0, Math.min(initialCycle, lastCycle))
   );
   const [ob, setOb] = useState<Orderbook | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  // Re-fetch on every data-version change AND on every cycle change. The
+  // useEffect dep on dataVersion makes the orderbook live-updating: each
+  // poll that bumps the backend's loaded_at re-pulls the current cycle.
   useEffect(() => {
-    setOb(null);
+    if (episode.num_cycles === 0) {
+      setOb(null);
+      return;
+    }
+    setErr(null);
     api
       .orderbook(cycle)
       .then(setOb)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [cycle]);
+  }, [cycle, dataVersion, episode.num_cycles]);
 
-  const clamp = (c: number) =>
-    Math.max(0, Math.min(c, episode.num_cycles - 1));
+  // Auto-clamp cycle if the dataset shrank under us (e.g. user pointed at
+  // a different db that has fewer cycles).
+  useEffect(() => {
+    setCycle((c) => Math.max(0, Math.min(c, lastCycle)));
+  }, [lastCycle]);
+
+  const clamp = (c: number) => Math.max(0, Math.min(c, lastCycle));
+
+  // Empty state — contract loaded but no cycles yet (or contract has zero
+  // recorded cycles). The slider would have max=-1 and break Recharts.
+  if (episode.num_cycles === 0) {
+    return (
+      <div className="space-y-4">
+        <SectionHeader
+          title="Orderbook viewer"
+          subtitle="Per-cycle snapshot — quotes, MM crosses, residual book, HF orders, HF fills"
+        />
+        <EmptyState>
+          No cycles yet. Once <code className="font-mono">run_demo.py</code>{" "}
+          writes its first cycle, the orderbook will appear here automatically.
+        </EmptyState>
+      </div>
+    );
+  }
 
   // Group residual book by side for the depth viz
   const { bids, asks, maxDepth } = useMemo(() => {
@@ -66,18 +98,18 @@ export function OrderbookViewer({
             <input
               type="range"
               min={0}
-              max={episode.num_cycles - 1}
+              max={lastCycle}
               value={cycle}
               onChange={(e) => setCycle(Number(e.target.value))}
               className="w-full accent-emerald-500"
             />
           </div>
           <div className="font-mono text-sm tabular text-zinc-200 min-w-[5rem] text-right">
-            cycle {cycle} / {episode.num_cycles - 1}
+            cycle {cycle} / {lastCycle}
           </div>
           <button
             onClick={() => setCycle((c) => clamp(c + 1))}
-            disabled={cycle >= episode.num_cycles - 1}
+            disabled={cycle >= lastCycle}
             className="p-2 rounded border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 disabled:opacity-30"
           >
             <ChevronRight size={16} />

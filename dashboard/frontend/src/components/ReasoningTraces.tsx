@@ -7,7 +7,13 @@ import { Badge, Card, EmptyState, RoleBadge, SectionHeader } from "./ui";
 
 type PhaseFilter = "ALL" | "MM" | "HF";
 
-export function ReasoningTraces({ episode }: { episode: Episode }) {
+export function ReasoningTraces({
+  episode,
+  dataVersion,
+}: {
+  episode: Episode;
+  dataVersion: number;
+}) {
   const [traces, setTraces] = useState<AllTraces | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [agentFilter, setAgentFilter] = useState<string>("ALL");
@@ -19,7 +25,7 @@ export function ReasoningTraces({ episode }: { episode: Episode }) {
       .traces()
       .then(setTraces)
       .catch((e) => setErr(e?.message || String(e)));
-  }, []);
+  }, [dataVersion]);
 
   // Flatten all traces with agent metadata attached
   type FlatTrace = TraceEntry & {
