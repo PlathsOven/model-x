@@ -147,7 +147,7 @@ def _ctx(**overrides):
 
 
 def test_openrouter_get_quote():
-    raw = '```json\n{"fair_value_estimate": 100.5, "bid_price": 100.0, "ask_price": 101.0, "bid_size": "5", "ask_size": 5, "reasoning": "neutral"}\n```'
+    raw = '```json\n{"bid_price": 100.0, "ask_price": 101.0, "bid_size": "5", "ask_size": 5, "reasoning": "neutral"}\n```'
     fake = FakeClient(raw)
     agent = OpenRouterAgent(model="anthropic/claude-sonnet-4", client=fake)
     quote = agent.get_quote(_ctx())
@@ -172,7 +172,7 @@ def test_openrouter_get_quote():
 
 
 def test_openrouter_get_order_buy():
-    raw = '{"fair_value_estimate": 105, "side": "buy", "size": 3, "reasoning": "edge"}'
+    raw = '{"side": "buy", "size": 3, "reasoning": "edge"}'
     fake = FakeClient(raw)
     agent = OpenRouterAgent(model="anthropic/claude-sonnet-4", client=fake)
     order = agent.get_order(_ctx(account_id="hf-X"), book=[BookLevel("mm-A", "ask", 100.0, 5)])
@@ -209,7 +209,7 @@ def test_openrouter_get_order_invalid_side():
 
 def test_openrouter_traces_capture_quote_and_order():
     """Every successful call appends a trace with prompt, raw, parsed, decision."""
-    quote_raw = '{"fair_value_estimate": 100.5, "bid_price": 100, "ask_price": 101, "bid_size": 5, "ask_size": 5, "reasoning": "neutral stance"}'
+    quote_raw = '{"bid_price": 100, "ask_price": 101, "bid_size": 5, "ask_size": 5, "reasoning": "neutral stance"}'
     fake = FakeClient(quote_raw)
     agent = OpenRouterAgent(model="anthropic/claude-sonnet-4", client=fake)
     agent.get_quote(_ctx())
@@ -227,7 +227,7 @@ def test_openrouter_traces_capture_quote_and_order():
     assert t["error"] is None
 
     # Now an HF call on the same agent — second trace.
-    fake.content = '{"fair_value_estimate": 99, "side": "sell", "size": 4, "reasoning": "rich"}'
+    fake.content = '{"side": "sell", "size": 4, "reasoning": "rich"}'
     agent.get_order(_ctx(account_id="hf-X"), book=[])
     assert len(agent.traces) == 2
     t2 = agent.traces[1]

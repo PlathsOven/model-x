@@ -340,29 +340,6 @@ def _info_by_cycle(state: AppState) -> Dict[int, str]:
     return out
 
 
-def _fair_values_by_cycle(state: AppState) -> Dict[str, Dict[int, float]]:
-    """{account_id: {cycle_number: fair_value_estimate}} from traces."""
-    out: Dict[str, Dict[int, float]] = {}
-    if not state.traces:
-        return out
-    agents = state.traces.get("agents", {}) or {}
-    for acct, data in agents.items():
-        per_cycle: Dict[int, float] = {}
-        for tr in data.get("traces", []) or []:
-            parsed = tr.get("parsed") or {}
-            fv = parsed.get("fair_value_estimate")
-            cn = tr.get("cycle_number")
-            if fv is None or cn is None:
-                continue
-            try:
-                per_cycle[int(cn)] = float(fv)
-            except (TypeError, ValueError):
-                continue
-        if per_cycle:
-            out[acct] = per_cycle
-    return out
-
-
 # ---------- scoring wrapper ----------
 
 def _partial_mm_scores(state: AppState) -> Dict[str, dict]:
@@ -839,7 +816,6 @@ def timeseries():
             "hf_accounts": [],
         }
     info_by_cycle = _info_by_cycle(state)
-    fv_by_agent = _fair_values_by_cycle(state)
     cycle_index_by_id = {cs.id: cs.cycle_index for cs in state.cycle_states}
 
     rows = []
@@ -853,11 +829,6 @@ def timeseries():
                 "ask_size": q.ask_size,
                 "mid": (q.bid_price + q.ask_price) / 2.0,
             }
-        # Merge fair values from traces (same cycle_number)
-        fv_at_cycle: Dict[str, float] = {}
-        for acct, per_cycle in fv_by_agent.items():
-            if cs.cycle_index in per_cycle:
-                fv_at_cycle[acct] = per_cycle[cs.cycle_index]
 
         rows.append({
             "cycle_index": cs.cycle_index,
@@ -866,7 +837,6 @@ def timeseries():
             "hf_mark": cs.hf_mark,
             "mark": state.marks[i] if state.marks[i] > 0 else None,
             "quotes_by_agent": quotes_by_agent,
-            "fv_by_agent": fv_at_cycle,
             "info": info_by_cycle.get(cs.cycle_index),
         })
 

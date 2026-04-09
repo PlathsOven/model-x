@@ -124,11 +124,12 @@ def test_single_mm_single_hf_metrics():
     assert hf["hf-X"].markout_5 == 0.0
 
     # Sharpe: per-cycle MM-A pnls are 0, -15, -45. Changes [0, -15, -30].
-    # mean -15, std sqrt(((0+15)^2 + 0 + (-15)^2)/3) = sqrt(150) ~= 12.247.
-    # Sharpe ~= -1.2247.
+    # total = -45, std = sqrt(((0+15)^2 + 0 + (-15)^2)/3) = sqrt(150).
+    # Sharpe = total / (sqrt(N) * std) = -45 / (sqrt(3) * sqrt(150))
+    #        = -45 / sqrt(450) = -15 / sqrt(50).
     assert mm["mm-A"].sharpe < 0
-    assert abs(mm["mm-A"].sharpe - (-15.0 / math.sqrt(150.0))) < 1e-9
-    assert abs(hf["hf-X"].sharpe - (15.0 / math.sqrt(150.0))) < 1e-9
+    assert abs(mm["mm-A"].sharpe - (-45.0 / math.sqrt(450.0))) < 1e-9
+    assert abs(hf["hf-X"].sharpe - (45.0 / math.sqrt(450.0))) < 1e-9
 
 
 def test_self_cross_metrics():

@@ -6,14 +6,34 @@
 # (requires OPENROUTER_API_KEY in your environment).
 
 agents:
-  - name: claude-sonnet
-    model: anthropic/claude-sonnet-4
+  # - name: step-3.5-flash-mm
+  #   model: stepfun/step-3.5-flash:free
+  #   role: MM
+
+  # - name: step-3.5-flash-hf
+  #   model: stepfun/step-3.5-flash:free
+  #   role: HF
+
+  - name: nemotron-3-super-120b-a12b-mm
+    model: nvidia/nemotron-3-super-120b-a12b:free
     role: MM
 
-  - name: gpt-4o
-    model: openai/gpt-4o
-    role: MM
-
-  - name: deepseek-r1
-    model: deepseek/deepseek-r1
+  - name: nemotron-3-super-120b-a12b-hf
+    model: nvidia/nemotron-3-super-120b-a12b:free
     role: HF
+
+  - name: trinity-large-preview-mm
+    model: arcee-ai/trinity-large-preview:free
+    role: MM
+
+  - name: trinity-large-preview-hf
+    model: arcee-ai/trinity-large-preview:free
+    role: HF
+
+  # - name: glm-4.5-air-mm
+  #   model: z-ai/glm-4.5-air:free
+  #   role: MM
+
+  # - name: glm-4.5-air-hf
+  #   model: z-ai/glm-4.5-air:free
+  #   role: HF

@@ -126,7 +126,6 @@ export interface TraceEntry {
   request: string;
   raw_response: string | null;
   parsed: {
-    fair_value_estimate?: number;
     reasoning?: string;
     bid_price?: number;
     bid_size?: number;
@@ -220,7 +219,6 @@ export interface TimeseriesRow {
       mid: number;
     }
   >;
-  fv_by_agent: Record<string, number>;
   info: string | null;
 }
 

@@ -44,18 +44,14 @@ CONTRACT = Contract(
 )
 
 SETTLEMENT_DATE = "2025-06-11"
-NUM_CYCLES = 20
+NUM_CYCLES = 5
 
 INFO_SCHEDULE_RAW: Dict[int, str] = {
-    0: "US CPI has printed 2.4%, 2.6%, 2.8%, 2.3%, 2.9% over the last five months. The Fed has held rates steady at the last two meetings. Core CPI has been trending slightly higher due to sticky shelter costs.",
-    2: "Goldman Sachs economists forecast May CPI at 2.7% YoY, citing moderating energy prices offset by persistent services inflation.",
-    4: "April PCE inflation came in at 2.5%, slightly below expectations of 2.6%. Markets interpreted this as disinflationary.",
-    7: "May gasoline prices averaged $3.42/gallon, up 8% from April. However, used car prices fell 2.1% month-over-month according to the Manheim index.",
-    9: "Cleveland Fed inflation nowcast for May CPI: 2.85% YoY. This model has had a mean absolute error of 0.12pp over the last 12 months.",
-    12: "May shelter cost data from Zillow suggests continued moderation in rent growth, with observed rent index falling 0.3% month-over-month.",
-    15: "2-year Treasury yield fell 5bps today to 4.18%, suggesting bond markets pricing in slightly lower inflation expectations.",
-    17: "A prominent financial commentator on social media claims inside knowledge that May CPI will print above 3.0%. This person has no established track record.",
-    19: "No new information. The BLS will release the May CPI report tomorrow morning.",
+    0: "US CPI has printed 2.4%, 2.6%, 2.8%, 2.3%, 2.9% over the last five months. The Fed has held rates steady at the last two meetings. Core CPI has been trending slightly higher due to sticky shelter costs. Goldman Sachs economists forecast May CPI at 2.7% YoY, citing moderating energy prices offset by persistent services inflation.",
+    1: "April PCE inflation came in at 2.5%, slightly below expectations of 2.6%. Markets interpreted this as disinflationary. May gasoline prices averaged $3.42/gallon, up 8% from April. However, used car prices fell 2.1% month-over-month according to the Manheim index.",
+    2: "Cleveland Fed inflation nowcast for May CPI: 2.85% YoY. This model has had a mean absolute error of 0.12pp over the last 12 months. May shelter cost data from Zillow suggests continued moderation in rent growth, with observed rent index falling 0.3% month-over-month.",
+    3: "2-year Treasury yield fell 5bps today to 4.18%, suggesting bond markets pricing in slightly lower inflation expectations. A prominent financial commentator on social media claims inside knowledge that May CPI will print above 3.0%. This person has no established track record.",
+    4: "No new information. The BLS will release the May CPI report tomorrow morning.",
 }
 
 # Runner expects List[str] per cycle.
@@ -202,7 +198,18 @@ def main():
         "--traces", default="episode_traces.json",
         help="output JSON path for reasoning traces",
     )
+    parser.add_argument(
+        "--auto", action="store_true", default=False,
+        help="skip manual phase-transition pauses (requires --settlement)",
+    )
+    parser.add_argument(
+        "--settlement", type=float, default=None,
+        help="settlement value (required when --auto is set)",
+    )
     args = parser.parse_args()
+
+    if args.auto and args.settlement is None:
+        parser.error("--auto requires --settlement <float>")
 
     agent_specs = parse_agent_config(args.config)
 
@@ -240,6 +247,11 @@ def main():
     print()
 
     # Run the episode.
+    extra_kwargs = {}
+    if args.auto:
+        extra_kwargs["input_fn"] = lambda _prompt: ""
+        extra_kwargs["settlement_value"] = args.settlement
+
     result = run_episode(
         contract=CONTRACT,
         info_schedule=INFO_SCHEDULE,
@@ -247,6 +259,7 @@ def main():
         num_cycles=NUM_CYCLES,
         settlement_date=SETTLEMENT_DATE,
         db=db,
+        **extra_kwargs,
     )
 
     # Score (run_episode already set CONTRACT.settlement_value).

@@ -170,19 +170,26 @@ def _cycle_pnl_series(
 
 
 def _sharpe(pnls: List[float]) -> float:
-    """Sharpe = mean / std of per-cycle PnL changes (first change is pnls[0] - 0)."""
+    """Sharpe = total PnL / (sqrt(N) * SD of per-cycle PnL changes).
+
+    Equivalent to the standard mean / std Sharpe scaled by sqrt(N) — the
+    annualized form, treating each cycle as one period.
+    """
     if not pnls:
         return 0.0
     changes = [pnls[0]]
     for i in range(1, len(pnls)):
         changes.append(pnls[i] - pnls[i - 1])
     n = len(changes)
-    mean = sum(changes) / n
+    if n == 0:
+        return 0.0
+    total = sum(changes)  # equals pnls[-1]
+    mean = total / n
     var = sum((c - mean) ** 2 for c in changes) / n
     std = var ** 0.5
     if std == 0:
         return 0.0
-    return mean / std
+    return total / (std * (n ** 0.5))
 
 
 def _account_volume(fills: List[Fill], account_id: str) -> int:

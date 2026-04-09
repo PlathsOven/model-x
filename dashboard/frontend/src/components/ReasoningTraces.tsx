@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronRight } from "lucide-react";
 import { api } from "../api";
 import type { AllTraces, Episode, TraceEntry } from "../types";
-import { fmtPrice } from "../lib/format";
 import { Badge, Card, EmptyState, RoleBadge, SectionHeader } from "./ui";
 
 type PhaseFilter = "ALL" | "MM" | "HF";
@@ -194,7 +193,6 @@ function TraceCard({
   const parsed = trace.parsed || {};
   const decision = trace.decision || {};
   const reasoning = (parsed as any).reasoning;
-  const fv = (parsed as any).fair_value_estimate;
 
   return (
     <div
@@ -215,14 +213,6 @@ function TraceCard({
             {trace.model}
           </span>
         </div>
-        {fv !== undefined && (
-          <div className="text-xs text-zinc-400">
-            fv{" "}
-            <span className="text-zinc-100 font-mono tabular">
-              {fmtPrice(fv, 4)}
-            </span>
-          </div>
-        )}
       </div>
 
       <div className="p-4 space-y-3">
@@ -307,9 +297,7 @@ function DecisionBlock({
   if (!data || Object.keys(data).length === 0) {
     return <div className="text-xs text-zinc-600">(none)</div>;
   }
-  const entries = Object.entries(data).filter(
-    ([k]) => k !== "reasoning" && k !== "fair_value_estimate"
-  );
+  const entries = Object.entries(data).filter(([k]) => k !== "reasoning");
   return (
     <div
       className={

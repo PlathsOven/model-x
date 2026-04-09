@@ -251,7 +251,6 @@ After the episode finishes, every LLM agent's full request/response history is w
           "request": "<the full prompt the model saw>",
           "raw_response": "<verbatim text the model returned>",
           "parsed": {
-            "fair_value_estimate": 2.7,
             "bid_price": 2.65,
             "ask_price": 2.75,
             "bid_size": 5,
