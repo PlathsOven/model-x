@@ -25,7 +25,13 @@ import {
 } from "../lib/format";
 import { Badge, Card, SectionHeader } from "./ui";
 
-export function PerformanceMetrics({ episode }: { episode: Episode }) {
+export function PerformanceMetrics({
+  episode,
+  dataVersion,
+}: {
+  episode: Episode;
+  dataVersion: number;
+}) {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [positions, setPositions] = useState<PositionsResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -37,7 +43,7 @@ export function PerformanceMetrics({ episode }: { episode: Episode }) {
         setPositions(p);
       })
       .catch((e) => setErr(e?.message || String(e)));
-  }, []);
+  }, [dataVersion]);
 
   const mmAccounts = useMemo(
     () => episode.accounts.filter((a) => a.role === "MM").map((a) => a.id),
@@ -276,7 +282,7 @@ export function PerformanceMetrics({ episode }: { episode: Episode }) {
               <XAxis
                 dataKey="cycle"
                 type="number"
-                domain={[0, episode.num_cycles - 1]}
+                domain={[0, Math.max(0, episode.num_cycles - 1)]}
                 allowDecimals={false}
                 stroke={AXIS_COLOR}
                 tick={{ fill: AXIS_COLOR, fontSize: 11 }}

@@ -9,17 +9,20 @@ type SortKey = "cycle_index" | "price" | "size";
 
 export function TradeLog({
   episode,
+  dataVersion,
   onCycleClick,
 }: {
   episode: Episode;
+  dataVersion: number;
   onCycleClick: (cycle: number) => void;
 }) {
+  const lastCycle = Math.max(0, episode.num_cycles - 1);
   const [fills, setFills] = useState<FillRow[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [agents, setAgents] = useState<Set<string>>(new Set());
   const [phase, setPhase] = useState<PhaseFilter>("ALL");
   const [cycleMin, setCycleMin] = useState<number>(0);
-  const [cycleMax, setCycleMax] = useState<number>(episode.num_cycles - 1);
+  const [cycleMax, setCycleMax] = useState<number>(lastCycle);
   const [sortKey, setSortKey] = useState<SortKey>("cycle_index");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
@@ -28,7 +31,13 @@ export function TradeLog({
       .fills()
       .then(setFills)
       .catch((e) => setErr(e?.message || String(e)));
-  }, []);
+  }, [dataVersion]);
+
+  // Auto-extend cycleMax when new cycles arrive, but only if the user hasn't
+  // narrowed the range below the previous tail (i.e. don't clobber filters).
+  useEffect(() => {
+    setCycleMax((prev) => (prev < lastCycle ? lastCycle : prev));
+  }, [lastCycle]);
 
   const allAgents = useMemo(() => episode.accounts.map((a) => a.id), [episode]);
 
@@ -110,7 +119,7 @@ export function TradeLog({
             <input
               type="number"
               min={0}
-              max={episode.num_cycles - 1}
+              max={lastCycle}
               value={cycleMin}
               onChange={(e) => setCycleMin(Number(e.target.value))}
               className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-200 tabular"
@@ -119,7 +128,7 @@ export function TradeLog({
             <input
               type="number"
               min={0}
-              max={episode.num_cycles - 1}
+              max={lastCycle}
               value={cycleMax}
               onChange={(e) => setCycleMax(Number(e.target.value))}
               className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-200 tabular"

@@ -20,7 +20,13 @@ import { Card, SectionHeader } from "./ui";
 
 type Metric = "position" | "pnl" | "cash";
 
-export function PositionTracker({ episode }: { episode: Episode }) {
+export function PositionTracker({
+  episode,
+  dataVersion,
+}: {
+  episode: Episode;
+  dataVersion: number;
+}) {
   const [pos, setPos] = useState<PositionsResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(
@@ -33,7 +39,24 @@ export function PositionTracker({ episode }: { episode: Episode }) {
       .positions()
       .then(setPos)
       .catch((e) => setErr(e?.message || String(e)));
-  }, []);
+  }, [dataVersion]);
+
+  // When new agents appear (e.g. live demo just added one) include them in
+  // the visible selection by default. Don't touch the selection if the user
+  // has explicitly hidden some.
+  useEffect(() => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const a of episode.accounts) {
+        if (!next.has(a.id)) {
+          next.add(a.id);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [episode.accounts]);
 
   const mmAccounts = episode.accounts.filter((a) => a.role === "MM").map((a) => a.id);
   const hfAccounts = episode.accounts.filter((a) => a.role === "HF").map((a) => a.id);
@@ -150,7 +173,7 @@ export function PositionTracker({ episode }: { episode: Episode }) {
               <XAxis
                 dataKey="cycle"
                 type="number"
-                domain={[0, episode.num_cycles - 1]}
+                domain={[0, Math.max(0, episode.num_cycles - 1)]}
                 allowDecimals={false}
                 stroke={AXIS_COLOR}
                 tick={{ fill: AXIS_COLOR, fontSize: 11 }}
