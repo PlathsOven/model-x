@@ -179,6 +179,7 @@ class OpenRouterAgent(Agent):
             },
             "json": {
                 "model": self.model,
+                "max_tokens": 1024,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "Submit your decision now."},
@@ -186,6 +187,25 @@ class OpenRouterAgent(Agent):
             },
             "timeout": self.timeout,
         }
+
+    def _log_http_error(self, resp, args: dict) -> None:
+        """Print diagnostic info before raise_for_status() on non-2xx."""
+        if resp.status_code < 400:
+            return
+        body = "(no body)"
+        try:
+            body = resp.text[:2000]
+        except Exception:
+            pass
+        model = args.get("json", {}).get("model", "?")
+        msgs = args.get("json", {}).get("messages", [])
+        prompt_len = sum(len(m.get("content", "")) for m in msgs)
+        print(
+            f"  [API ERROR] model={model} status={resp.status_code} "
+            f"prompt_chars={prompt_len}\n"
+            f"  response: {body}",
+            flush=True,
+        )
 
     def _call(self, system_prompt: str) -> str:
         pool = None if self._explicit_api_key else get_key_pool()
@@ -204,9 +224,11 @@ class OpenRouterAgent(Agent):
             if resp.status_code == 429 and pool is not None:
                 tried += 1
                 if tried >= max_tries or not pool.rotate():
+                    self._log_http_error(resp, args)
                     resp.raise_for_status()
                 continue
 
+            self._log_http_error(resp, args)
             resp.raise_for_status()
             data = resp.json()
             if "choices" not in data:
@@ -243,9 +265,11 @@ class OpenRouterAgent(Agent):
             if resp.status_code == 429 and pool is not None:
                 tried += 1
                 if tried >= max_tries or not pool.rotate():
+                    self._log_http_error(resp, args)
                     resp.raise_for_status()
                 continue
 
+            self._log_http_error(resp, args)
             resp.raise_for_status()
             data = resp.json()
             if "choices" not in data:

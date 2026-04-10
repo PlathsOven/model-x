@@ -13,13 +13,13 @@ agents:
   #   model: stepfun/step-3.5-flash:free
   #   role: HF
 
-  - name: nemotron-3-super-120b-a12b-mm
-    model: nvidia/nemotron-3-super-120b-a12b:free
-    role: MM
+  # - name: nemotron-3-super-120b-a12b-mm
+  #   model: nvidia/nemotron-3-super-120b-a12b:free
+  #   role: MM
 
-  - name: nemotron-3-super-120b-a12b-hf
-    model: nvidia/nemotron-3-super-120b-a12b:free
-    role: HF
+  # - name: nemotron-3-super-120b-a12b-hf
+  #   model: nvidia/nemotron-3-super-120b-a12b:free
+  #   role: HF
 
   - name: nemotron-3-nano-30b-a3b-mm
     model: nvidia/nemotron-3-nano-30b-a3b:free
@@ -29,10 +29,10 @@ agents:
     model: nvidia/nemotron-3-nano-30b-a3b:free
     role: HF
 
-  # - name: glm-4.5-air-mm
-  #   model: z-ai/glm-4.5-air:free
-  #   role: MM
+  - name: glm-4.5-air-mm
+    model: z-ai/glm-4.5-air:free
+    role: MM
 
-  # - name: glm-4.5-air-hf
-  #   model: z-ai/glm-4.5-air:free
-  #   role: HF
+  - name: glm-4.5-air-hf
+    model: z-ai/glm-4.5-air:free
+    role: HF

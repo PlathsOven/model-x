@@ -438,10 +438,12 @@ def _format_trade_history(fills: List[Fill], account_id: str, limit: int = 20) -
     return "\n".join(lines)
 
 
-def _format_info_log(info: List[str]) -> str:
+def _format_info_log(info: List[str], limit: int = 10) -> str:
     if not info:
         return "(no information yet)"
-    return "\n".join(f"- {item}" for item in info)
+    recent = info[-limit:]
+    prefix = f"({len(info) - len(recent)} older entries omitted)\n" if len(info) > limit else ""
+    return prefix + "\n".join(f"- {item}" for item in recent)
 
 
 # ---------- factory ----------
