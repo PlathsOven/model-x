@@ -26,7 +26,7 @@ from typing import Any, Dict, List
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from modelx.agents.base import Agent
 from modelx.agents.openrouter import OpenRouterAgent
@@ -164,12 +164,12 @@ async def _run(args: Any) -> None:
     market_config, phase_seconds = load_contract_config(args.contract)
     agent_specs = load_agent_specs(args.agents)
 
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        print(
-            "error: OPENROUTER_API_KEY not set in environment "
-            "(required for OpenRouter agents)",
-            file=sys.stderr,
-        )
+    from modelx.agents.openrouter import get_key_pool
+    try:
+        pool = get_key_pool()
+        print(f"[run_live] OpenRouter key pool: {pool.size} key(s)", flush=True)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
     config = GlobalConfig(

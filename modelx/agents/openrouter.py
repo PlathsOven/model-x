@@ -21,6 +21,60 @@ from .prompts import HF_SYSTEM_PROMPT, MM_SYSTEM_PROMPT
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+# ---------- API key pool ----------
+
+class OpenRouterKeyPool:
+    """Shared pool of OpenRouter API keys with round-robin rotation on 429."""
+
+    def __init__(self, keys: List[str]):
+        if not keys:
+            raise ValueError("OpenRouterKeyPool: no API keys provided")
+        self._keys = keys
+        self._index = 0
+
+    @property
+    def current_key(self) -> str:
+        return self._keys[self._index]
+
+    @property
+    def size(self) -> int:
+        return len(self._keys)
+
+    def rotate(self) -> bool:
+        """Advance to the next key. Returns True if there was a different key
+        to rotate to, False if only one key exists (nowhere to go)."""
+        old = self._index
+        self._index = (self._index + 1) % len(self._keys)
+        old_masked = "..." + self._keys[old][-4:]
+        new_masked = "..." + self._keys[self._index][-4:]
+        log.warning(
+            "OpenRouter 429 on key %s (%d/%d) — rotating to key %s (%d/%d)",
+            old_masked, old + 1, len(self._keys),
+            new_masked, self._index + 1, len(self._keys),
+        )
+        return self._index != old
+
+
+_key_pool: Optional[OpenRouterKeyPool] = None
+
+
+def get_key_pool() -> OpenRouterKeyPool:
+    """Return the shared key pool, lazily initialized from OPENROUTER_API_KEY."""
+    global _key_pool
+    if _key_pool is None:
+        raw = os.environ.get("OPENROUTER_API_KEY", "")
+        keys = [k.strip() for k in raw.split(",") if k.strip()]
+        if not keys:
+            raise ValueError(
+                "No OpenRouter API keys found. Set OPENROUTER_API_KEY "
+                "(comma-separated for multiple keys)."
+            )
+        _key_pool = OpenRouterKeyPool(keys)
+        if len(keys) > 1:
+            log.info("OpenRouter key pool initialized with %d keys", len(keys))
+    return _key_pool
+
+
 # ---------- parsing / coercion helpers ----------
 
 def strip_json(text: str) -> str:
@@ -96,11 +150,10 @@ class OpenRouterAgent(Agent):
         client: Optional[Any] = None,
     ):
         self.model = model
-        self.api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
-        if not self.api_key and client is None:
-            raise ValueError(
-                "OpenRouterAgent: no API key. Set OPENROUTER_API_KEY or pass api_key="
-            )
+        self._explicit_api_key = api_key
+        if not api_key and client is None:
+            # Validate that the shared pool can be initialized.
+            get_key_pool()
         if timeout is not None:
             self.timeout = timeout
         else:
@@ -113,11 +166,15 @@ class OpenRouterAgent(Agent):
 
     # ---- HTTP ----
 
-    def _request_args(self, system_prompt: str) -> Dict[str, Any]:
+    def _get_api_key(self) -> str:
+        """Return the API key to use for this request."""
+        return self._explicit_api_key or get_key_pool().current_key
+
+    def _request_args(self, system_prompt: str, api_key: str) -> Dict[str, Any]:
         """Build the headers/body shared by sync and async call paths."""
         return {
             "headers": {
-                "Authorization": f"Bearer {self.api_key}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             "json": {
@@ -131,48 +188,74 @@ class OpenRouterAgent(Agent):
         }
 
     def _call(self, system_prompt: str) -> str:
-        args = self._request_args(system_prompt)
-        if self._client is not None:
-            resp = self._client.post(OPENROUTER_URL, **args)
-        else:
-            import httpx  # lazy: only required for real network calls
-            resp = httpx.post(OPENROUTER_URL, **args)
-        resp.raise_for_status()
-        data = resp.json()
-        if "choices" not in data:
-            log.error("OpenRouter response missing 'choices' for model=%s: %s",
-                      self.model, json.dumps(data)[:2000])
-            raise ValueError(
-                f"OpenRouter response missing 'choices' for model {self.model}. "
-                f"Response: {json.dumps(data)[:500]}"
-            )
-        return data["choices"][0]["message"]["content"]
+        pool = None if self._explicit_api_key else get_key_pool()
+        max_tries = pool.size if pool else 1
+        tried = 0
+
+        while True:
+            api_key = self._explicit_api_key or pool.current_key
+            args = self._request_args(system_prompt, api_key)
+            if self._client is not None:
+                resp = self._client.post(OPENROUTER_URL, **args)
+            else:
+                import httpx  # lazy: only required for real network calls
+                resp = httpx.post(OPENROUTER_URL, **args)
+
+            if resp.status_code == 429 and pool is not None:
+                tried += 1
+                if tried >= max_tries or not pool.rotate():
+                    resp.raise_for_status()
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            if "choices" not in data:
+                log.error("OpenRouter response missing 'choices' for model=%s: %s",
+                          self.model, json.dumps(data)[:2000])
+                raise ValueError(
+                    f"OpenRouter response missing 'choices' for model {self.model}. "
+                    f"Response: {json.dumps(data)[:500]}"
+                )
+            return data["choices"][0]["message"]["content"]
 
     async def _call_async(self, system_prompt: str) -> str:
         """Async variant — opens a per-call AsyncClient so the live scheduler
         can hit many models in parallel without blocking the event loop."""
-        args = self._request_args(system_prompt)
-        if self._client is not None and hasattr(self._client, "post_async"):
-            # Test injection point: a fake client may expose `post_async`.
-            resp = await self._client.post_async(OPENROUTER_URL, **args)
-        else:
-            import httpx
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(
-                    OPENROUTER_URL,
-                    headers=args["headers"],
-                    json=args["json"],
+        pool = None if self._explicit_api_key else get_key_pool()
+        max_tries = pool.size if pool else 1
+        tried = 0
+
+        while True:
+            api_key = self._explicit_api_key or pool.current_key
+            args = self._request_args(system_prompt, api_key)
+            if self._client is not None and hasattr(self._client, "post_async"):
+                # Test injection point: a fake client may expose `post_async`.
+                resp = await self._client.post_async(OPENROUTER_URL, **args)
+            else:
+                import httpx
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    resp = await client.post(
+                        OPENROUTER_URL,
+                        headers=args["headers"],
+                        json=args["json"],
+                    )
+
+            if resp.status_code == 429 and pool is not None:
+                tried += 1
+                if tried >= max_tries or not pool.rotate():
+                    resp.raise_for_status()
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            if "choices" not in data:
+                log.error("OpenRouter response missing 'choices' for model=%s: %s",
+                          self.model, json.dumps(data)[:2000])
+                raise ValueError(
+                    f"OpenRouter response missing 'choices' for model {self.model}. "
+                    f"Response: {json.dumps(data)[:500]}"
                 )
-        resp.raise_for_status()
-        data = resp.json()
-        if "choices" not in data:
-            log.error("OpenRouter response missing 'choices' for model=%s: %s",
-                      self.model, json.dumps(data)[:2000])
-            raise ValueError(
-                f"OpenRouter response missing 'choices' for model {self.model}. "
-                f"Response: {json.dumps(data)[:500]}"
-            )
-        return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"]
 
     # ---- Agent interface ----
 

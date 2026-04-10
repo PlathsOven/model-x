@@ -12,8 +12,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modelx.agents.base import AgentContext, format_book
+import modelx.agents.openrouter as openrouter_mod
 from modelx.agents.openrouter import (
     OpenRouterAgent,
+    OpenRouterKeyPool,
+    get_key_pool,
     parse_response,
     strip_json,
     to_float,
@@ -103,11 +106,13 @@ def test_format_book_sides():
 # ---------- OpenRouterAgent (with fake client) ----------
 
 class FakeResp:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            raise Exception(f"HTTP {self.status_code}")
 
     def json(self):
         return self._payload
@@ -254,6 +259,103 @@ def test_openrouter_traces_capture_pass_and_error():
     assert err_trace["decision"] is None
 
 
+class FakeClientSequence:
+    """Returns different responses on successive calls."""
+
+    def __init__(self, responses):
+        self._responses = responses
+        self._call_count = 0
+
+    def post(self, url, **kwargs):
+        resp = self._responses[min(self._call_count, len(self._responses) - 1)]
+        self._call_count += 1
+        return resp
+
+
+def _reset_key_pool():
+    """Reset the module-level key pool singleton between tests."""
+    openrouter_mod._key_pool = None
+
+
+# ---------- OpenRouterKeyPool ----------
+
+def test_key_pool_single_key():
+    pool = OpenRouterKeyPool(["key-A"])
+    assert pool.current_key == "key-A"
+    assert pool.size == 1
+    assert pool.rotate() is False  # nowhere to go
+    assert pool.current_key == "key-A"
+
+
+def test_key_pool_rotation():
+    pool = OpenRouterKeyPool(["key-A", "key-B", "key-C"])
+    assert pool.current_key == "key-A"
+    assert pool.rotate() is True
+    assert pool.current_key == "key-B"
+    assert pool.rotate() is True
+    assert pool.current_key == "key-C"
+    assert pool.rotate() is True  # wraps around
+    assert pool.current_key == "key-A"
+
+
+def test_429_rotates_key_and_retries():
+    """On 429 with multiple keys, agent retries with the next key."""
+    _reset_key_pool()
+    openrouter_mod._key_pool = OpenRouterKeyPool(["key-1", "key-2", "key-3"])
+
+    ok_payload = {"choices": [{"message": {"content": '{"bid_price": 50, "ask_price": 51, "bid_size": 1, "ask_size": 1}'}}]}
+    fake = FakeClientSequence([
+        FakeResp(None, status_code=429),     # first key: rate limited
+        FakeResp(ok_payload, status_code=200),  # second key: ok
+    ])
+    agent = OpenRouterAgent(model="test/model", client=fake)
+    quote = agent.get_quote(_ctx())
+    assert quote is not None
+    assert quote.bid_price == 50.0
+    assert fake._call_count == 2
+    # Pool should now be on key-2
+    assert openrouter_mod._key_pool.current_key == "key-2"
+    _reset_key_pool()
+
+
+def test_429_all_keys_exhausted():
+    """When all keys are rate-limited, the error is raised."""
+    _reset_key_pool()
+    openrouter_mod._key_pool = OpenRouterKeyPool(["key-1", "key-2"])
+
+    fake = FakeClientSequence([
+        FakeResp(None, status_code=429),
+        FakeResp(None, status_code=429),
+    ])
+    agent = OpenRouterAgent(model="test/model", client=fake)
+    raised = False
+    try:
+        agent.get_quote(_ctx())
+    except Exception as e:
+        raised = True
+        assert "429" in str(e)
+    assert raised
+    _reset_key_pool()
+
+
+def test_explicit_api_key_no_rotation():
+    """When api_key is passed directly, 429 is not retried."""
+    _reset_key_pool()
+    fake = FakeClientSequence([
+        FakeResp(None, status_code=429),
+    ])
+    agent = OpenRouterAgent(model="test/model", api_key="explicit-key", client=fake)
+    raised = False
+    try:
+        agent.get_quote(_ctx())
+    except Exception as e:
+        raised = True
+        assert "429" in str(e)
+    assert raised
+    assert fake._call_count == 1
+    _reset_key_pool()
+
+
 TESTS = [
     test_strip_json_raw,
     test_strip_json_with_fence,
@@ -272,6 +374,11 @@ TESTS = [
     test_openrouter_get_order_invalid_side,
     test_openrouter_traces_capture_quote_and_order,
     test_openrouter_traces_capture_pass_and_error,
+    test_key_pool_single_key,
+    test_key_pool_rotation,
+    test_429_rotates_key_and_retries,
+    test_429_all_keys_exhausted,
+    test_explicit_api_key_no_rotation,
 ]
 
 
