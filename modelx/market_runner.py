@@ -104,6 +104,26 @@ class MarketRunner:
         """Advance this market by one phase. Called by the supervisor."""
         if not self.is_active():
             return
+        # Time-based termination — check before running any phase.
+        if (
+            self.config.settlement_datetime is not None
+            and datetime.now(timezone.utc)
+            >= self.config.settlement_datetime.astimezone(timezone.utc)
+        ):
+            self.market.state = "PENDING_SETTLEMENT"
+            print(
+                f"[{self.market.id}] settlement time reached — "
+                f"entered PENDING_SETTLEMENT",
+                flush=True,
+            )
+            update_market_progress(
+                self.db,
+                self.market.id,
+                self.market.state,
+                self.market.pending_mm,
+                self.market.last_phase_ts,
+            )
+            return
         try:
             if self.market.pending_mm:
                 await self._run_mm_phase(phase_deadline, tick_time)
@@ -111,18 +131,6 @@ class MarketRunner:
             else:
                 await self._run_hf_phase(phase_deadline, tick_time)
                 self.market.pending_mm = 1
-                # Time-based termination.
-                if (
-                    self.config.settlement_datetime is not None
-                    and datetime.now(timezone.utc)
-                    >= self.config.settlement_datetime.astimezone(timezone.utc)
-                ):
-                    self.market.state = "PENDING_SETTLEMENT"
-                    print(
-                        f"[{self.market.id}] settlement time reached — "
-                        f"entered PENDING_SETTLEMENT",
-                        flush=True,
-                    )
             self.market.last_phase_ts = tick_time
             update_market_progress(
                 self.db,

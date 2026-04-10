@@ -298,7 +298,10 @@ export default function App() {
                 className="text-emerald-400"
               />
             )}
-            {!episode.settled && (
+            {!episode.settled && episode.market_state === "PENDING_SETTLEMENT" && (
+              <Stat label="Status" value="Pending Settlement" className="text-amber-400" />
+            )}
+            {!episode.settled && episode.market_state !== "PENDING_SETTLEMENT" && (
               <Stat label="Status" value="Unsettled" className="text-amber-400" />
             )}
           </div>
