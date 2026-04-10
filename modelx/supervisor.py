@@ -55,10 +55,12 @@ class MarketSupervisor:
                 agent_factory=self.agent_factory,
             )
             self._runners[market_config.id] = runner
+            last_ts = runner.market.last_phase_ts
+            ts_str = _fmt_ts(last_ts) if last_ts > 0 else "none"
             print(
                 f"[supervisor] loaded market {market_config.id!r}: "
-                f"state={runner.market.state}, cycle={runner.market.current_cycle}/"
-                f"{market_config.num_cycles}, pending_mm={runner.market.pending_mm}",
+                f"state={runner.market.state}, last_phase={ts_str}, "
+                f"pending_mm={runner.market.pending_mm}",
                 flush=True,
             )
 
@@ -94,7 +96,7 @@ class MarketSupervisor:
 
             phase_deadline = tick_at + phase_seconds
             await asyncio.gather(
-                *[r.step(phase_deadline) for r in active],
+                *[r.step(phase_deadline, tick_at) for r in active],
                 return_exceptions=True,
             )
 

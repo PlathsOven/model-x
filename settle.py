@@ -18,13 +18,13 @@ import time
 # Make the modelx package importable when run from the repo root.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from modelx.cycle import load_cycle
+from modelx.phase import load_phase
 from modelx.db import (
     connect,
     get_contract,
     get_market,
     list_accounts_for_market,
-    list_cycle_states,
+    list_phase_states,
     list_fills_by_contract,
     positions_for_contract,
     update_market_progress,
@@ -73,14 +73,14 @@ def main() -> None:
     contract.settled_at = time.time()
     upsert_contract(db, contract)
 
-    # Reconstruct cycles + fills + positions for scoring.
-    cycle_states = list_cycle_states(db, contract.id)
-    cycles = [load_cycle(db, contract, cs.id) for cs in cycle_states]
+    # Reconstruct phases + fills + positions for scoring.
+    phase_states = list_phase_states(db, contract.id)
+    phases = [load_phase(db, contract, ps.id) for ps in phase_states]
     fills = list_fills_by_contract(db, contract.id)
     positions = positions_for_contract(db, contract.id)
 
-    mm_scores = score_mm(fills, cycles, positions, contract)
-    hf_scores = score_hf(fills, cycles, positions, contract)
+    mm_scores = score_mm(fills, phases, positions, contract)
+    hf_scores = score_hf(fills, phases, positions, contract)
 
     # Persist a lifetime stat row per participant. We write one row per
     # account that traded in this market, including HFs (which are tracked
@@ -115,7 +115,7 @@ def main() -> None:
     # Mark the market as SETTLED.
     market.state = "SETTLED"
     update_market_progress(
-        db, market.id, market.state, market.current_cycle, market.pending_mm,
+        db, market.id, market.state, market.pending_mm, market.last_phase_ts,
     )
 
     _print_summary(market.id, args.value, contract.multiplier, mm_scores, hf_scores)

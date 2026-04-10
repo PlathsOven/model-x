@@ -5,27 +5,35 @@ import { fmtInt, fmtPrice } from "../lib/format";
 import { Badge, Card, SectionHeader } from "./ui";
 
 type PhaseFilter = "ALL" | "MM" | "HF";
-type SortKey = "cycle_index" | "price" | "size";
+type SortKey = "timestamp" | "price" | "size";
+
+function fmtTimestamp(epoch: number | null): string {
+  if (epoch == null) return "—";
+  const d = new Date(epoch * 1000);
+  return d.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
 
 export function TradeLog({
   episode,
   dataVersion,
-  onCycleClick,
+  onPhaseClick,
   marketId,
 }: {
   episode: Episode;
   dataVersion: number;
-  onCycleClick: (cycle: number) => void;
+  onPhaseClick: (phaseId: string) => void;
   marketId?: string | null;
 }) {
-  const lastCycle = Math.max(0, episode.num_cycles - 1);
   const [fills, setFills] = useState<FillRow[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [agents, setAgents] = useState<Set<string>>(new Set());
   const [phase, setPhase] = useState<PhaseFilter>("ALL");
-  const [cycleMin, setCycleMin] = useState<number>(0);
-  const [cycleMax, setCycleMax] = useState<number>(lastCycle);
-  const [sortKey, setSortKey] = useState<SortKey>("cycle_index");
+  const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   useEffect(() => {
@@ -35,12 +43,6 @@ export function TradeLog({
       .catch((e) => setErr(e?.message || String(e)));
   }, [dataVersion, marketId]);
 
-  // Auto-extend cycleMax when new cycles arrive, but only if the user hasn't
-  // narrowed the range below the previous tail (i.e. don't clobber filters).
-  useEffect(() => {
-    setCycleMax((prev) => (prev < lastCycle ? lastCycle : prev));
-  }, [lastCycle]);
-
   const allAgents = useMemo(() => episode.accounts.map((a) => a.id), [episode]);
 
   const filtered = useMemo(() => {
@@ -48,7 +50,6 @@ export function TradeLog({
     return fills
       .filter((f) => {
         if (phase !== "ALL" && f.phase !== phase) return false;
-        if (f.cycle_index < cycleMin || f.cycle_index > cycleMax) return false;
         if (agents.size > 0) {
           if (!agents.has(f.buyer) && !agents.has(f.seller)) return false;
         }
@@ -56,9 +57,9 @@ export function TradeLog({
       })
       .sort((a, b) => {
         const s = sortDir === "asc" ? 1 : -1;
-        return (a[sortKey] - b[sortKey]) * s;
+        return ((a[sortKey] ?? 0) - (b[sortKey] ?? 0)) * s;
       });
-  }, [fills, phase, cycleMin, cycleMax, agents, sortKey, sortDir]);
+  }, [fills, phase, agents, sortKey, sortDir]);
 
   const toggleAgent = (id: string) => {
     setAgents((prev) => {
@@ -113,30 +114,6 @@ export function TradeLog({
             ))}
           </div>
 
-          {/* Cycle range */}
-          <div className="flex items-center gap-3 text-xs">
-            <span className="text-zinc-500 uppercase tracking-widest text-[10px]">
-              Cycles
-            </span>
-            <input
-              type="number"
-              min={0}
-              max={lastCycle}
-              value={cycleMin}
-              onChange={(e) => setCycleMin(Number(e.target.value))}
-              className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-200 tabular"
-            />
-            <span className="text-zinc-600">to</span>
-            <input
-              type="number"
-              min={0}
-              max={lastCycle}
-              value={cycleMax}
-              onChange={(e) => setCycleMax(Number(e.target.value))}
-              className="w-16 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-zinc-200 tabular"
-            />
-          </div>
-
           {/* Agent multiselect */}
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span className="text-zinc-500 uppercase tracking-widest text-[10px]">
@@ -174,10 +151,10 @@ export function TradeLog({
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
                 <HeaderCell
-                  label="Cycle"
-                  active={sortKey === "cycle_index"}
+                  label="Time"
+                  active={sortKey === "timestamp"}
                   dir={sortDir}
-                  onClick={() => setSort("cycle_index")}
+                  onClick={() => setSort("timestamp")}
                 />
                 <th className="py-2 pr-4 font-medium">Phase</th>
                 <th className="py-2 pr-4 font-medium">Buyer</th>
@@ -204,9 +181,11 @@ export function TradeLog({
                 <tr
                   key={f.id}
                   className="border-b border-zinc-900 last:border-0 hover:bg-zinc-900/40 cursor-pointer"
-                  onClick={() => onCycleClick(f.cycle_index)}
+                  onClick={() => onPhaseClick(f.phase_id)}
                 >
-                  <td className="py-1.5 pr-4 text-zinc-300">{f.cycle_index}</td>
+                  <td className="py-1.5 pr-4 text-zinc-300 font-mono">
+                    {fmtTimestamp(f.timestamp)}
+                  </td>
                   <td className="py-1.5 pr-4">
                     <Badge tone={f.phase === "MM" ? "orange" : "blue"}>
                       {f.phase}

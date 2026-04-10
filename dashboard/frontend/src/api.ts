@@ -3,7 +3,7 @@
 import type {
   AgentTraces,
   AllTraces,
-  CycleRow,
+  PhaseRow,
   Episode,
   FillRow,
   LifetimeMetrics,
@@ -42,43 +42,41 @@ export const api = {
   markets: () => getJson<MarketSummary[]>("/api/markets"),
   episode: (marketId?: string | null) =>
     getJson<Episode>(withMarket("/api/episode", marketId)),
-  cycles: (marketId?: string | null) =>
-    getJson<CycleRow[]>(withMarket("/api/cycles", marketId)),
+  phases: (marketId?: string | null) =>
+    getJson<PhaseRow[]>(withMarket("/api/phases", marketId)),
   fills: (
     opts?: {
       agent?: string;
       phase?: "MM" | "HF";
-      cycleMin?: number;
-      cycleMax?: number;
     },
     marketId?: string | null
   ) => {
     const qs = new URLSearchParams();
     if (opts?.agent) qs.set("agent", opts.agent);
     if (opts?.phase) qs.set("phase", opts.phase);
-    if (opts?.cycleMin !== undefined) qs.set("cycle_min", String(opts.cycleMin));
-    if (opts?.cycleMax !== undefined) qs.set("cycle_max", String(opts.cycleMax));
     const q = qs.toString();
     return getJson<FillRow[]>(
       withMarket(`/api/fills${q ? `?${q}` : ""}`, marketId)
     );
   },
-  quotes: (cycleIndex?: number, marketId?: string | null) =>
+  quotes: (phaseId?: string, marketId?: string | null) =>
     getJson<QuoteRow[]>(
       withMarket(
-        `/api/quotes${cycleIndex !== undefined ? `?cycle_index=${cycleIndex}` : ""}`,
+        `/api/quotes${phaseId ? `?phase_id=${encodeURIComponent(phaseId)}` : ""}`,
         marketId
       )
     ),
-  orders: (cycleIndex?: number, marketId?: string | null) =>
+  orders: (phaseId?: string, marketId?: string | null) =>
     getJson<OrderRow[]>(
       withMarket(
-        `/api/orders${cycleIndex !== undefined ? `?cycle_index=${cycleIndex}` : ""}`,
+        `/api/orders${phaseId ? `?phase_id=${encodeURIComponent(phaseId)}` : ""}`,
         marketId
       )
     ),
-  orderbook: (cycleIndex: number, marketId?: string | null) =>
-    getJson<Orderbook>(withMarket(`/api/orderbook/${cycleIndex}`, marketId)),
+  orderbook: (phaseId: string, marketId?: string | null) =>
+    getJson<Orderbook>(
+      withMarket(`/api/orderbook/${encodeURIComponent(phaseId)}`, marketId)
+    ),
   traces: () => getJson<AllTraces>("/api/traces"),
   agentTraces: (agent: string) =>
     getJson<AgentTraces & { account_id: string }>(

@@ -1,20 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { api } from "../api";
 import type { Episode, Metrics, PositionsResponse } from "../types";
-import {
-  AXIS_COLOR,
-  GRID_COLOR,
-  buildAgentColors,
-} from "../lib/colors";
+import { buildAgentColors } from "../lib/colors";
 import {
   fmtBps,
   fmtInt,
@@ -23,6 +10,7 @@ import {
   fmtPrice,
   pnlClass,
 } from "../lib/format";
+import { Plot, DARK_LAYOUT, PLOTLY_CONFIG } from "../lib/plotly-theme";
 import { Badge, Card, SectionHeader } from "./ui";
 
 export function PerformanceMetrics({
@@ -60,28 +48,56 @@ export function PerformanceMetrics({
     [mmAccounts, hfAccounts]
   );
 
-  // Build per-cycle PnL chart data: rows keyed by cycle_index with one column
-  // per agent. Uses pnl_realized when settled, else pnl_mtm.
-  const pnlRows = useMemo(() => {
+  // Build per-phase PnL chart data.
+  const pnlTraces = useMemo(() => {
     if (!positions) return [];
-    // Use first agent's series as the cycle spine
     const agents = Object.keys(positions.agents);
     if (agents.length === 0) return [];
-    const spine = positions.agents[agents[0]];
-    return spine.map((_, i) => {
-      const row: Record<string, any> = { cycle: spine[i].cycle_index };
-      for (const a of agents) {
-        const p = positions.agents[a][i];
-        row[a] = p.pnl_realized ?? p.pnl_mtm;
-      }
-      return row;
+
+    return agents.map((a) => {
+      const points = positions.agents[a];
+      return {
+        x: points.map((p) => new Date(p.timestamp * 1000)),
+        y: points.map((p) => p.pnl_realized ?? p.pnl_mtm),
+        type: "scatter" as const,
+        mode: "lines" as const,
+        name: a,
+        line: { color: agentColors[a], width: 2 },
+        connectgaps: true,
+        hovertemplate: `${a}<br>PnL: %{y:.4f}<br>%{x}<extra></extra>`,
+      };
     });
-  }, [positions]);
+  }, [positions, agentColors]);
+
+  const pnlLayout = useMemo(
+    () => ({
+      ...DARK_LAYOUT,
+      xaxis: {
+        ...DARK_LAYOUT.xaxis,
+        type: "date" as const,
+      },
+      yaxis: {
+        ...DARK_LAYOUT.yaxis,
+        tickformat: ".2f",
+      },
+      showlegend: true,
+      legend: {
+        ...DARK_LAYOUT.legend,
+        orientation: "h" as const,
+        x: 0,
+        y: -0.15,
+        xanchor: "left" as const,
+        yanchor: "top" as const,
+      },
+      margin: { t: 20, r: 30, b: 60, l: 60 },
+    }),
+    []
+  );
 
   if (err)
     return <div className="text-sm text-red-400 font-mono">{err}</div>;
   if (!metrics || !positions)
-    return <div className="text-sm text-zinc-500">Loading…</div>;
+    return <div className="text-sm text-zinc-500">Loading...</div>;
 
   return (
     <div className="space-y-6">
@@ -90,13 +106,13 @@ export function PerformanceMetrics({
         subtitle={
           metrics.settled
             ? "Final scores computed from modelx.scoring"
-            : "Contract not settled — PnL, Sharpe, and markouts are pending"
+            : "Live scores — contract not yet settled"
         }
         action={
           metrics.settled ? (
             <Badge tone="emerald">settled</Badge>
           ) : (
-            <Badge tone="amber">pending</Badge>
+            <Badge tone="amber">live</Badge>
           )
         }
       />
@@ -167,23 +183,23 @@ export function PerformanceMetrics({
                   fmt={(v) => fmtPct(v, 1)}
                 />
                 <MetricRow
-                  label="markout_1"
+                  label="markout_2"
                   agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.markout_1}
+                  get={(a) => metrics.mm[a]?.markout_2}
                   fmt={fmtPnl}
                   colorize
                 />
                 <MetricRow
-                  label="markout_5"
+                  label="markout_10"
                   agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.markout_5}
+                  get={(a) => metrics.mm[a]?.markout_10}
                   fmt={fmtPnl}
                   colorize
                 />
                 <MetricRow
-                  label="markout_20"
+                  label="markout_40"
                   agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.markout_20}
+                  get={(a) => metrics.mm[a]?.markout_40}
                   fmt={fmtPnl}
                   colorize
                 />
@@ -246,23 +262,23 @@ export function PerformanceMetrics({
                   colorize
                 />
                 <MetricRow
-                  label="markout_1"
+                  label="markout_2"
                   agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.markout_1}
+                  get={(a) => metrics.hf[a]?.markout_2}
                   fmt={fmtPnl}
                   colorize
                 />
                 <MetricRow
-                  label="markout_5"
+                  label="markout_10"
                   agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.markout_5}
+                  get={(a) => metrics.hf[a]?.markout_10}
                   fmt={fmtPnl}
                   colorize
                 />
                 <MetricRow
-                  label="markout_20"
+                  label="markout_40"
                   agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.markout_20}
+                  get={(a) => metrics.hf[a]?.markout_40}
                   fmt={fmtPnl}
                   colorize
                 />
@@ -273,46 +289,15 @@ export function PerformanceMetrics({
       )}
 
       {/* PnL over time chart */}
-      <Card title="PnL over cycles">
-        <div className="h-[380px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart
-              data={pnlRows}
-              margin={{ top: 10, right: 30, left: 10, bottom: 10 }}
-            >
-              <CartesianGrid stroke={GRID_COLOR} strokeDasharray="3 3" />
-              <XAxis
-                dataKey="cycle"
-                type="number"
-                domain={[0, Math.max(0, episode.num_cycles - 1)]}
-                allowDecimals={false}
-                stroke={AXIS_COLOR}
-                tick={{ fill: AXIS_COLOR, fontSize: 11 }}
-              />
-              <YAxis
-                stroke={AXIS_COLOR}
-                tick={{ fill: AXIS_COLOR, fontSize: 11 }}
-                tickFormatter={(v) => fmtPnl(v, 2)}
-                width={70}
-              />
-              <Tooltip
-                formatter={(value: any, name: any) => [fmtPnl(value, 4), name]}
-                labelFormatter={(l) => `Cycle ${l}`}
-              />
-              {[...mmAccounts, ...hfAccounts].map((a) => (
-                <Line
-                  key={a}
-                  type="monotone"
-                  dataKey={a}
-                  stroke={agentColors[a]}
-                  strokeWidth={2}
-                  dot={false}
-                  isAnimationActive={false}
-                  connectNulls
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
+      <Card title="PnL over time">
+        <div style={{ width: "100%", height: 380 }}>
+          <Plot
+            data={pnlTraces as any}
+            layout={pnlLayout as any}
+            config={PLOTLY_CONFIG as any}
+            useResizeHandler
+            style={{ width: "100%", height: "100%" }}
+          />
         </div>
       </Card>
     </div>
@@ -341,7 +326,7 @@ function MetricRow({
         return (
           <td key={a} className={`py-1.5 px-3 text-right ${cls}`}>
             {v === null || v === undefined ? (
-              <span className="text-zinc-600">pending</span>
+              <span className="text-zinc-600">---</span>
             ) : (
               fmt(v as number)
             )}

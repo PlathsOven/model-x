@@ -1,31 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  CartesianGrid,
-  ComposedChart,
-  Customized,
-  Line,
-  ReferenceLine,
-  ResponsiveContainer,
-  Scatter,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { api } from "../api";
 import type { Episode, Timeseries } from "../types";
-import {
-  AXIS_COLOR,
-  GRID_COLOR,
-  PHASE_COLORS,
-  buildAgentColors,
-} from "../lib/colors";
+import { PHASE_COLORS, buildAgentColors } from "../lib/colors";
 import { fmtPrice } from "../lib/format";
+import { Plot, DARK_LAYOUT, PLOTLY_CONFIG } from "../lib/plotly-theme";
 import { Card, SectionHeader } from "./ui";
 
 interface LayerToggles {
   mark: boolean;
-  mmMark: boolean;
-  hfMark: boolean;
   mmFills: boolean;
   hfFills: boolean;
   quoteRanges: boolean;
@@ -33,37 +15,32 @@ interface LayerToggles {
   info: boolean;
 }
 
-// Map (cycle, phase) → numeric x position. MM phase of cycle k is at 2k,
-// HF phase at 2k+1, settlement at 2*numCycles. Using a numeric XAxis avoids
-// Recharts' category-merging behavior, which reorders / drops ticks when
-// Scatter components have their own `data` arrays.
-function xIndexFor(cycle: number, phase: "MM" | "HF"): number {
-  return cycle * 2 + (phase === "MM" ? 0 : 1);
-}
-
-function phaseTickLabel(cycle: number, phase: "MM" | "HF"): string {
-  return `${cycle}·${phase === "MM" ? "M" : "H"}`;
+// Format an epoch-ms timestamp as "HH:MM" in local time.
+function formatTime(epochMs: number): string {
+  const d = new Date(epochMs);
+  return d.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
 }
 
 interface ChartRow {
   xIndex: number;
   phase: "MM" | "HF" | "S";
-  cycle: number | null;
-  mm_mark: number | null;
-  hf_mark: number | null;
+  phaseId: string | null;
   mark: number | null;
   info: string | null;
 }
 
 interface FillRow {
   xIndex: number;
-  cycle: number;
+  phaseId: string;
   price: number;
   size: number;
   buyer: string;
   seller: string;
   is_self_cross: boolean;
-  // HF only:
   taker_hf?: string;
   direction?: "up" | "down";
 }
@@ -71,13 +48,13 @@ interface FillRow {
 export function TimeSeriesChart({
   episode: _episode,
   dataVersion,
-  focusCycle,
+  focusPhaseId,
   onClearFocus,
   marketId,
 }: {
   episode: Episode;
   dataVersion: number;
-  focusCycle: number | null;
+  focusPhaseId: string | null;
   onClearFocus: () => void;
   marketId?: string | null;
 }) {
@@ -85,8 +62,6 @@ export function TimeSeriesChart({
   const [err, setErr] = useState<string | null>(null);
   const [toggles, setToggles] = useState<LayerToggles>({
     mark: true,
-    mmMark: false,
-    hfMark: false,
     mmFills: true,
     hfFills: true,
     quoteRanges: true,
@@ -112,118 +87,88 @@ export function TimeSeriesChart({
     [ts]
   );
 
-  // Build chart rows (one per phase tick + settlement), per-MM whisker rows,
-  // and fill rows. Everything keys off `xIndex` (numeric) so the XAxis stays
-  // ordered no matter what subset of layers / agents is visible.
+  // Build chart rows, per-MM whisker rows, and fill rows.
   const {
     chartRows,
-    chartRowByX,
-    settleX,
-    cyclesWithMmRow,
+    settleX: _settleX,
+    phaseIdSet,
     whiskerByMm,
     mmFillRows,
     hfFillRows,
-    tickValues,
-    tickLabels,
-    xDomain,
     priceDomain,
   } = useMemo(() => {
     if (!ts) {
       return {
         chartRows: [] as ChartRow[],
-        chartRowByX: {} as Record<number, ChartRow>,
         settleX: null as number | null,
-        cyclesWithMmRow: new Set<number>(),
-        whiskerByMm: {} as Record<string, { xIndex: number; bid: number; ask: number; mid: number }[]>,
+        phaseIdSet: new Set<string>(),
+        whiskerByMm: {} as Record<
+          string,
+          { xIndex: number; bid: number; ask: number; mid: number }[]
+        >,
         mmFillRows: [] as FillRow[],
         hfFillRows: [] as FillRow[],
-        tickValues: [] as number[],
-        tickLabels: {} as Record<number, string>,
-        xDomain: [-0.5, 0.5] as [number, number],
         priceDomain: [0, 1] as [number, number],
       };
     }
 
+    const phaseX: Record<string, number> = {};
     const rows: ChartRow[] = [];
-    const cyclesWithMmRow = new Set<number>();
-    const whiskerByMm: Record<string, { xIndex: number; bid: number; ask: number; mid: number }[]> = {};
+    const phaseIdSet = new Set<string>();
+    const whiskerByMm: Record<
+      string,
+      { xIndex: number; bid: number; ask: number; mid: number }[]
+    > = {};
     for (const a of ts.mm_accounts) whiskerByMm[a] = [];
 
     let lastMark: number | null = null;
-    for (const c of ts.cycles) {
-      const mmX = xIndexFor(c.cycle_index, "MM");
-      cyclesWithMmRow.add(c.cycle_index);
-      if (c.mm_mark != null) lastMark = c.mm_mark;
-      rows.push({
-        xIndex: mmX,
-        phase: "MM",
-        cycle: c.cycle_index,
-        mm_mark: c.mm_mark ?? null,
-        hf_mark: null,
-        mark: lastMark,
-        info: c.info,
-      });
-      for (const [acct, q] of Object.entries(c.quotes_by_agent)) {
-        whiskerByMm[acct]?.push({
-          xIndex: mmX,
-          mid: q.mid,
-          bid: q.bid_price,
-          ask: q.ask_price,
-        });
-      }
+    for (const p of ts.phases) {
+      const xMs = p.timestamp * 1000;
+      phaseIdSet.add(p.phase_id);
+      phaseX[p.phase_id] = xMs;
 
-      const hfX = xIndexFor(c.cycle_index, "HF");
-      if (c.hf_mark != null) lastMark = c.hf_mark;
+      if (p.mark != null) lastMark = p.mark;
+      const phaseType = p.phase_type as "MM" | "HF";
       rows.push({
-        xIndex: hfX,
-        phase: "HF",
-        cycle: c.cycle_index,
-        mm_mark: null,
-        hf_mark: c.hf_mark ?? null,
+        xIndex: xMs,
+        phase: phaseType,
+        phaseId: p.phase_id,
         mark: lastMark,
-        info: null,
+        info: p.info ?? null,
       });
+
+      if (phaseType === "MM" && p.quotes_by_agent) {
+        for (const [acct, q] of Object.entries(p.quotes_by_agent)) {
+          whiskerByMm[acct]?.push({
+            xIndex: xMs,
+            mid: q.mid,
+            bid: q.bid_price,
+            ask: q.ask_price,
+          });
+        }
+      }
     }
 
-    const numCycles = ts.cycles.length;
     let settleX: number | null = null;
     if (ts.settlement != null) {
-      settleX = numCycles * 2;
+      const lastRow = rows[rows.length - 1];
+      const lastX = lastRow?.xIndex ?? 0;
+      settleX = lastX + 60_000;
       lastMark = ts.settlement;
       rows.push({
         xIndex: settleX,
         phase: "S",
-        cycle: null,
-        mm_mark: null,
-        hf_mark: null,
+        phaseId: null,
         mark: lastMark,
         info: null,
       });
     }
 
-    const tickValues: number[] = [];
-    const tickLabels: Record<number, string> = {};
-    for (let i = 0; i < numCycles; i++) {
-      tickValues.push(i * 2, i * 2 + 1);
-      tickLabels[i * 2] = phaseTickLabel(i, "MM");
-      tickLabels[i * 2 + 1] = phaseTickLabel(i, "HF");
-    }
-    if (settleX != null) {
-      tickValues.push(settleX);
-      tickLabels[settleX] = "Settle";
-    }
-    const lastTick =
-      settleX ?? (numCycles > 0 ? numCycles * 2 - 1 : 0);
-    const xDomain: [number, number] = [-0.5, lastTick + 0.5];
-
-    const chartRowByX: Record<number, ChartRow> = {};
-    for (const r of rows) chartRowByX[r.xIndex] = r;
-
     const mmFillRows: FillRow[] = ts.fills
       .filter((f) => f.phase === "MM")
       .map((f) => ({
-        xIndex: xIndexFor(f.cycle_index, "MM"),
-        cycle: f.cycle_index,
+        xIndex: phaseX[f.phase_id] ?? f.timestamp * 1000,
+        phaseId: f.phase_id,
         price: f.price,
         size: f.size,
         buyer: f.buyer,
@@ -236,23 +181,22 @@ export function TimeSeriesChart({
         const hfIsBuyer = hfAccountSet.has(f.buyer);
         const taker_hf = hfIsBuyer ? f.buyer : f.seller;
         return {
-          xIndex: xIndexFor(f.cycle_index, "HF"),
-          cycle: f.cycle_index,
+          xIndex: phaseX[f.phase_id] ?? f.timestamp * 1000,
+          phaseId: f.phase_id,
           price: f.price,
           size: f.size,
           buyer: f.buyer,
           seller: f.seller,
           is_self_cross: f.is_self_cross,
           taker_hf,
-          direction: hfIsBuyer ? "up" : "down",
+          direction: hfIsBuyer ? ("up" as const) : ("down" as const),
         };
       });
 
     const prices: number[] = [];
-    for (const c of ts.cycles) {
-      if (c.mm_mark != null) prices.push(c.mm_mark);
-      if (c.hf_mark != null) prices.push(c.hf_mark);
-      for (const q of Object.values(c.quotes_by_agent)) {
+    for (const p of ts.phases) {
+      if (p.mark != null) prices.push(p.mark);
+      for (const q of Object.values(p.quotes_by_agent)) {
         prices.push(q.bid_price, q.ask_price);
       }
     }
@@ -264,21 +208,16 @@ export function TimeSeriesChart({
 
     return {
       chartRows: rows,
-      chartRowByX,
       settleX,
-      cyclesWithMmRow,
+      phaseIdSet,
       whiskerByMm,
       mmFillRows,
       hfFillRows,
-      tickValues,
-      tickLabels,
-      xDomain,
       priceDomain: [min - pad, max + pad] as [number, number],
     };
   }, [ts, hfAccountSet]);
 
-  // Apply per-agent visibility filter to fills + whiskers used for rendering
-  // and tooltip display.
+  // Apply per-agent visibility filter.
   const visibleMmFillRows = useMemo(
     () =>
       mmFillRows.filter(
@@ -294,19 +233,250 @@ export function TimeSeriesChart({
     [hfFillRows, hiddenAgents]
   );
 
-  // Pre-bucket fills by xIndex for the custom tooltip — Recharts' default
-  // tooltip collapses multiple Scatter points per series at the same x to
-  // a single entry, so we render the tooltip body ourselves.
-  const fillsByX = useMemo(() => {
-    const out: Record<number, FillRow[]> = {};
-    for (const f of visibleMmFillRows) {
-      (out[f.xIndex] ||= []).push(f);
+  // Compute focus x position.
+  const focusXIndex = (() => {
+    if (focusPhaseId == null || !phaseIdSet.has(focusPhaseId)) return null;
+    const row = chartRows.find((r) => r.phaseId === focusPhaseId);
+    return row?.xIndex ?? null;
+  })();
+
+  // Build Plotly traces.
+  const { traces, layout } = useMemo(() => {
+    const traces: any[] = [];
+
+    // --- Mark line (step-after / carry-forward) ---
+    if (toggles.mark && chartRows.length > 0) {
+      const markX: number[] = [];
+      const markY: (number | null)[] = [];
+      const markText: string[] = [];
+      for (const r of chartRows) {
+        markX.push(r.xIndex);
+        markY.push(r.mark);
+        const label =
+          r.phase === "S"
+            ? "Settlement"
+            : `${formatTime(r.xIndex)} ${r.phase === "MM" ? "MM" : "HF"}`;
+        markText.push(
+          `${label}<br>Mark: ${r.mark != null ? fmtPrice(r.mark, 4) : "---"}`
+        );
+      }
+      traces.push({
+        x: markX,
+        y: markY,
+        type: "scatter",
+        mode: "lines",
+        name: "Mark",
+        line: { color: "#ffffff", width: 2.5, shape: "hv" },
+        connectgaps: true,
+        hovertemplate: "%{text}<extra></extra>",
+        text: markText,
+      });
     }
-    for (const f of visibleHfFillRows) {
-      (out[f.xIndex] ||= []).push(f);
+
+    // --- MM fills scatter ---
+    if (toggles.mmFills && visibleMmFillRows.length > 0) {
+      traces.push({
+        x: visibleMmFillRows.map((f) => f.xIndex),
+        y: visibleMmFillRows.map((f) => f.price),
+        type: "scatter",
+        mode: "markers",
+        name: "MM fills",
+        marker: {
+          color: PHASE_COLORS.MM,
+          size: visibleMmFillRows.map((f) => 6 + Math.sqrt(f.size) * 2),
+          symbol: "circle",
+          opacity: 0.75,
+          line: { color: PHASE_COLORS.MM, width: 1 },
+        },
+        hovertemplate: visibleMmFillRows.map(
+          (f) =>
+            `MM fill<br>${f.buyer} <-> ${f.seller}<br>Price: ${fmtPrice(f.price, 4)}<br>Size: ${f.size}<extra></extra>`
+        ),
+      });
     }
-    return out;
-  }, [visibleMmFillRows, visibleHfFillRows]);
+
+    // --- HF fills scatter (per agent, up/down triangles) ---
+    if (toggles.hfFills && ts) {
+      for (const acct of ts.hf_accounts) {
+        if (hiddenAgents.has(acct)) continue;
+        const fills = visibleHfFillRows.filter((f) => f.taker_hf === acct);
+        if (fills.length === 0) continue;
+        const color = agentColors[acct];
+        traces.push({
+          x: fills.map((f) => f.xIndex),
+          y: fills.map((f) => f.price),
+          type: "scatter",
+          mode: "markers",
+          name: `${acct} taker`,
+          marker: {
+            color: color,
+            size: fills.map((f) => 8 + Math.sqrt(f.size) * 2),
+            symbol: fills.map((f) =>
+              f.direction === "up" ? "triangle-up" : "triangle-down"
+            ),
+            opacity: 0.9,
+            line: { color: color, width: 1.5 },
+          },
+          hovertemplate: fills.map(
+            (f) =>
+              `${acct} ${f.direction === "up" ? "BUY" : "SELL"}<br>${f.buyer} -> ${f.seller}<br>Price: ${fmtPrice(f.price, 4)}<br>Size: ${f.size}<extra></extra>`
+          ),
+        });
+      }
+    }
+
+    // --- Quote whiskers (per-MM bid/ask ranges) ---
+    if (toggles.quoteRanges && ts) {
+      const visibleMmAccounts = ts.mm_accounts.filter(
+        (a) => !hiddenAgents.has(a)
+      );
+      for (const acct of visibleMmAccounts) {
+        const whiskers = whiskerByMm[acct] || [];
+        if (whiskers.length === 0) continue;
+        const color = agentColors[acct];
+        // Draw bid-ask range as a candlestick-like trace using error bars on the mid.
+        traces.push({
+          x: whiskers.map((w) => w.xIndex),
+          y: whiskers.map((w) => w.mid),
+          type: "scatter",
+          mode: "markers",
+          name: `${acct} quotes`,
+          marker: {
+            color: color,
+            size: 3,
+            symbol: "line-ew",
+            line: { color: color, width: 1.5 },
+          },
+          error_y: {
+            type: "data",
+            symmetric: false,
+            array: whiskers.map((w) => w.ask - w.mid),
+            arrayminus: whiskers.map((w) => w.mid - w.bid),
+            color: color,
+            thickness: 2,
+            width: 4,
+          },
+          hovertemplate: whiskers.map(
+            (w) =>
+              `${acct} quotes<br>Ask: ${fmtPrice(w.ask, 4)}<br>Mid: ${fmtPrice(w.mid, 4)}<br>Bid: ${fmtPrice(w.bid, 4)}<extra></extra>`
+          ),
+        });
+      }
+    }
+
+    // --- Build layout shapes for reference lines ---
+    const shapes: any[] = [];
+    const annotations: any[] = [];
+
+    // Settlement line (horizontal dashed emerald)
+    if (toggles.settlement && ts?.settlement != null) {
+      shapes.push({
+        type: "line",
+        xref: "paper",
+        x0: 0,
+        x1: 1,
+        yref: "y",
+        y0: ts.settlement,
+        y1: ts.settlement,
+        line: { color: "#10b981", width: 1.5, dash: "dash" },
+      });
+      annotations.push({
+        xref: "paper",
+        x: 1,
+        yref: "y",
+        y: ts.settlement,
+        text: `settlement ${fmtPrice(ts.settlement, 3)}`,
+        showarrow: false,
+        font: { color: "#10b981", size: 11 },
+        xanchor: "right",
+        yanchor: "bottom",
+      });
+    }
+
+    // Info event vertical lines (amber dashed)
+    if (toggles.info && ts) {
+      for (const pid of ts.info_phases) {
+        if (!phaseIdSet.has(pid)) continue;
+        const row = chartRows.find((r) => r.phaseId === pid);
+        if (!row) continue;
+        shapes.push({
+          type: "line",
+          xref: "x",
+          x0: row.xIndex,
+          x1: row.xIndex,
+          yref: "paper",
+          y0: 0,
+          y1: 1,
+          line: { color: "#f59e0b", width: 1, dash: "dot" },
+          opacity: 0.6,
+        });
+      }
+    }
+
+    // Focus highlight (vertical dashed red)
+    if (focusXIndex !== null) {
+      shapes.push({
+        type: "line",
+        xref: "x",
+        x0: focusXIndex,
+        x1: focusXIndex,
+        yref: "paper",
+        y0: 0,
+        y1: 1,
+        line: { color: "#f43f5e", width: 1.5, dash: "dash" },
+      });
+    }
+
+    // Build tick values and labels for x-axis.
+    const tickvals = chartRows.map((r) => r.xIndex);
+    const ticktext = chartRows.map((r) => {
+      if (r.phase === "S") return "Settle";
+      return `${formatTime(r.xIndex)} ${r.phase === "MM" ? "M" : "H"}`;
+    });
+
+    const layout: any = {
+      ...DARK_LAYOUT,
+      xaxis: {
+        ...DARK_LAYOUT.xaxis,
+        tickvals,
+        ticktext,
+        tickangle: -45,
+        tickfont: { size: 9, color: "#71717a" },
+        type: "linear",
+      },
+      yaxis: {
+        ...DARK_LAYOUT.yaxis,
+        range: priceDomain,
+        tickformat: ".3f",
+      },
+      shapes,
+      annotations,
+      showlegend: true,
+      legend: {
+        ...DARK_LAYOUT.legend,
+        orientation: "h" as const,
+        x: 0,
+        y: -0.15,
+        xanchor: "left",
+        yanchor: "top",
+      },
+      margin: { t: 20, r: 30, b: 80, l: 60 },
+    };
+
+    return { traces, layout };
+  }, [
+    chartRows,
+    toggles,
+    visibleMmFillRows,
+    visibleHfFillRows,
+    ts,
+    agentColors,
+    hiddenAgents,
+    whiskerByMm,
+    phaseIdSet,
+    focusXIndex,
+    priceDomain,
+  ]);
 
   if (err) {
     return (
@@ -315,17 +485,7 @@ export function TimeSeriesChart({
       </div>
     );
   }
-  if (!ts) return <div className="text-sm text-zinc-500">Loading…</div>;
-
-  const infoMap = ts.info_by_cycle || {};
-  const focusXIndex =
-    focusCycle != null && cyclesWithMmRow.has(focusCycle)
-      ? xIndexFor(focusCycle, "MM")
-      : null;
-
-  const visibleMmAccounts = ts.mm_accounts.filter(
-    (a) => !hiddenAgents.has(a)
-  );
+  if (!ts) return <div className="text-sm text-zinc-500">Loading...</div>;
 
   return (
     <div className="space-y-4">
@@ -333,293 +493,35 @@ export function TimeSeriesChart({
         title="Time series"
         subtitle="Marks · fills · quote whiskers · info events"
         action={
-          focusCycle !== null && (
+          focusPhaseId !== null && (
             <button
               onClick={onClearFocus}
               className="text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-700 rounded px-2 py-1"
             >
-              clear focus on cycle {focusCycle}
+              clear focus
             </button>
           )
         }
       />
 
       <Card>
-        <div className="h-[540px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart
-              data={chartRows}
-              margin={{ top: 20, right: 30, left: 10, bottom: 10 }}
-            >
-              <CartesianGrid stroke={GRID_COLOR} strokeDasharray="3 3" />
-              <XAxis
-                type="number"
-                dataKey="xIndex"
-                domain={xDomain}
-                ticks={tickValues}
-                tickFormatter={(v: number) => tickLabels[v] ?? ""}
-                interval={0}
-                allowDecimals={false}
-                stroke={AXIS_COLOR}
-                tick={{ fill: AXIS_COLOR, fontSize: 10 }}
-                label={{
-                  value: "cycle · phase",
-                  position: "insideBottom",
-                  fill: AXIS_COLOR,
-                  offset: -5,
-                  fontSize: 11,
-                }}
-              />
-              <YAxis
-                domain={priceDomain}
-                stroke={AXIS_COLOR}
-                tick={{ fill: AXIS_COLOR, fontSize: 11 }}
-                tickFormatter={(v) => fmtPrice(v, 3)}
-                width={70}
-              />
-              <Tooltip
-                cursor={{ stroke: AXIS_COLOR, strokeDasharray: "3 3" }}
-                content={(props: any) => (
-                  <ChartTooltip
-                    active={props.active}
-                    label={props.label}
-                    chartRowByX={chartRowByX}
-                    fillsByX={fillsByX}
-                    infoMap={infoMap}
-                    settleX={settleX}
-                    agentColors={agentColors}
-                    hfAccountSet={hfAccountSet}
-                  />
-                )}
-              />
-
-              {/* Settlement reference line (horizontal at settlement value) */}
-              {toggles.settlement && ts.settlement != null && (
-                <ReferenceLine
-                  y={ts.settlement}
-                  stroke="#34d399"
-                  strokeDasharray="6 3"
-                  label={{
-                    value: `settlement ${fmtPrice(ts.settlement, 3)}`,
-                    fill: "#34d399",
-                    fontSize: 11,
-                    position: "insideTopRight",
-                  }}
-                />
-              )}
-
-              {/* Info schedule vertical lines (anchored to each cycle's MM tick) */}
-              {toggles.info &&
-                ts.info_cycles
-                  .filter((c) => cyclesWithMmRow.has(c))
-                  .map((c) => (
-                    <ReferenceLine
-                      key={`info-${c}`}
-                      x={xIndexFor(c, "MM")}
-                      stroke="#fbbf24"
-                      strokeDasharray="2 4"
-                      strokeOpacity={0.6}
-                    />
-                  ))}
-
-              {/* Focus cycle highlight (anchored to MM tick) */}
-              {focusXIndex !== null && (
-                <ReferenceLine
-                  x={focusXIndex}
-                  stroke="#f43f5e"
-                  strokeWidth={1.5}
-                  strokeDasharray="4 2"
-                />
-              )}
-
-              {/* Per-MM quote whiskers — drawn via Customized so we can read
-                  the chart's xScale/yScale and offset multiple MMs horizontally
-                  at the same tick. */}
-              {toggles.quoteRanges && (
-                <Customized
-                  component={(cprops: any) => {
-                    const xAxisMap = cprops.xAxisMap;
-                    const yAxisMap = cprops.yAxisMap;
-                    if (!xAxisMap || !yAxisMap) return null;
-                    const xAxis: any = Object.values(xAxisMap)[0];
-                    const yAxis: any = Object.values(yAxisMap)[0];
-                    if (!xAxis?.scale || !yAxis?.scale) return null;
-                    const xScale = xAxis.scale;
-                    const yScale = yAxis.scale;
-                    const numMms = visibleMmAccounts.length;
-                    const elements: any[] = [];
-                    visibleMmAccounts.forEach((acct, mmIdx) => {
-                      const offsetPx =
-                        numMms > 1 ? (mmIdx - (numMms - 1) / 2) * 6 : 0;
-                      const color = agentColors[acct];
-                      for (const w of whiskerByMm[acct] || []) {
-                        const cxRaw = xScale(w.xIndex);
-                        if (cxRaw == null || Number.isNaN(cxRaw)) continue;
-                        const cx = cxRaw + offsetPx;
-                        const yBid = yScale(w.bid);
-                        const yAsk = yScale(w.ask);
-                        elements.push(
-                          <g key={`whisker-${acct}-${w.xIndex}`}>
-                            <line
-                              x1={cx}
-                              y1={yBid}
-                              x2={cx}
-                              y2={yAsk}
-                              stroke={color}
-                              strokeWidth={2}
-                              strokeLinecap="round"
-                            />
-                            <line
-                              x1={cx - 4}
-                              y1={yBid}
-                              x2={cx + 4}
-                              y2={yBid}
-                              stroke={color}
-                              strokeWidth={2}
-                              strokeLinecap="round"
-                            />
-                            <line
-                              x1={cx - 4}
-                              y1={yAsk}
-                              x2={cx + 4}
-                              y2={yAsk}
-                              stroke={color}
-                              strokeWidth={2}
-                              strokeLinecap="round"
-                            />
-                          </g>
-                        );
-                      }
-                    });
-                    return <g>{elements}</g>;
-                  }}
-                />
-              )}
-
-              {/* Individual mark layers (faint) */}
-              {toggles.mmMark && (
-                <Line
-                  type="linear"
-                  dataKey="mm_mark"
-                  stroke="#a78bfa"
-                  strokeWidth={1}
-                  strokeOpacity={0.5}
-                  dot={false}
-                  isAnimationActive={false}
-                  connectNulls
-                  name="mm_mark"
-                />
-              )}
-              {toggles.hfMark && (
-                <Line
-                  type="linear"
-                  dataKey="hf_mark"
-                  stroke="#22d3ee"
-                  strokeWidth={1}
-                  strokeOpacity={0.5}
-                  dot={false}
-                  isAnimationActive={false}
-                  connectNulls
-                  name="hf_mark"
-                />
-              )}
-
-              {/* Primary carry-forward mark line (one point per phase tick) */}
-              {toggles.mark && (
-                <Line
-                  type="stepAfter"
-                  dataKey="mark"
-                  stroke="#ffffff"
-                  strokeWidth={2.5}
-                  dot={false}
-                  isAnimationActive={false}
-                  connectNulls
-                  name="mark (carry-forward)"
-                />
-              )}
-
-              {/* Fill scatters */}
-              {toggles.mmFills && visibleMmFillRows.length > 0 && (
-                <Scatter
-                  name="MM fill"
-                  data={visibleMmFillRows}
-                  fill={PHASE_COLORS.MM}
-                  dataKey="price"
-                  isAnimationActive={false}
-                  shape={(props: any) => {
-                    const r = 3 + Math.sqrt(props.payload.size);
-                    return (
-                      <circle
-                        cx={props.cx}
-                        cy={props.cy}
-                        r={r}
-                        fill={PHASE_COLORS.MM}
-                        fillOpacity={0.75}
-                        stroke={PHASE_COLORS.MM}
-                      />
-                    );
-                  }}
-                />
-              )}
-              {toggles.hfFills &&
-                ts.hf_accounts.map((acct) => {
-                  if (hiddenAgents.has(acct)) return null;
-                  const fills = visibleHfFillRows.filter(
-                    (f) => f.taker_hf === acct
-                  );
-                  if (fills.length === 0) return null;
-                  const color = agentColors[acct];
-                  return (
-                    <Scatter
-                      key={`hf-fill-${acct}`}
-                      name={`${acct} taker`}
-                      data={fills}
-                      fill={color}
-                      dataKey="price"
-                      isAnimationActive={false}
-                      shape={(props: any) => {
-                        const { cx, cy, payload } = props;
-                        const r = 4 + Math.sqrt(payload.size);
-                        const points =
-                          payload.direction === "up"
-                            ? `${cx},${cy - r} ${cx - r},${cy + r} ${cx + r},${cy + r}`
-                            : `${cx},${cy + r} ${cx - r},${cy - r} ${cx + r},${cy - r}`;
-                        return (
-                          <polygon
-                            points={points}
-                            fill={color}
-                            fillOpacity={0.9}
-                            stroke={color}
-                            strokeWidth={1.5}
-                          />
-                        );
-                      }}
-                    />
-                  );
-                })}
-            </ComposedChart>
-          </ResponsiveContainer>
+        <div style={{ width: "100%", height: 540 }}>
+          <Plot
+            data={traces}
+            layout={layout}
+            config={PLOTLY_CONFIG as any}
+            useResizeHandler
+            style={{ width: "100%", height: "100%" }}
+          />
         </div>
 
         {/* Layer legend + toggles */}
         <div className="mt-4 flex flex-wrap gap-2 text-xs">
           <LayerToggle
-            label="Carry-fwd mark"
+            label="Mark"
             color="#ffffff"
             on={toggles.mark}
             onClick={() => setToggles((t) => ({ ...t, mark: !t.mark }))}
-          />
-          <LayerToggle
-            label="mm_mark"
-            color="#a78bfa"
-            on={toggles.mmMark}
-            onClick={() => setToggles((t) => ({ ...t, mmMark: !t.mmMark }))}
-          />
-          <LayerToggle
-            label="hf_mark"
-            color="#22d3ee"
-            on={toggles.hfMark}
-            onClick={() => setToggles((t) => ({ ...t, hfMark: !t.hfMark }))}
           />
           <LayerToggle
             label="MM fills"
@@ -643,7 +545,7 @@ export function TimeSeriesChart({
           />
           <LayerToggle
             label="Settlement"
-            color="#34d399"
+            color="#10b981"
             on={toggles.settlement}
             dashed
             onClick={() =>
@@ -652,7 +554,7 @@ export function TimeSeriesChart({
           />
           <LayerToggle
             label="Info events"
-            color="#fbbf24"
+            color="#f59e0b"
             on={toggles.info}
             dashed
             onClick={() => setToggles((t) => ({ ...t, info: !t.info }))}
@@ -711,101 +613,6 @@ export function TimeSeriesChart({
           ))}
         </div>
       </Card>
-    </div>
-  );
-}
-
-function ChartTooltip({
-  active,
-  label,
-  chartRowByX,
-  fillsByX,
-  infoMap,
-  settleX,
-  agentColors,
-  hfAccountSet,
-}: {
-  active: boolean | undefined;
-  label: number | string | undefined;
-  chartRowByX: Record<number, ChartRow>;
-  fillsByX: Record<number, FillRow[]>;
-  infoMap: Record<string, string>;
-  settleX: number | null;
-  agentColors: Record<string, string>;
-  hfAccountSet: Set<string>;
-}) {
-  if (!active || label == null) return null;
-  const xIdx = typeof label === "number" ? label : Number(label);
-  if (Number.isNaN(xIdx)) return null;
-  const row = chartRowByX[xIdx];
-  if (!row) return null;
-
-  let header: string;
-  if (settleX != null && xIdx === settleX) {
-    header = "Settlement";
-  } else if (row.cycle == null) {
-    header = "—";
-  } else {
-    const phaseLabel = row.phase === "MM" ? "MM phase" : "HF phase";
-    const info = infoMap[String(row.cycle)];
-    const infoSuffix = info && row.phase === "MM" ? " · info released" : "";
-    header = `Cycle ${row.cycle} — ${phaseLabel}${infoSuffix}`;
-  }
-
-  const fills = fillsByX[xIdx] || [];
-
-  return (
-    <div className="rounded border border-zinc-700 bg-zinc-900/95 px-3 py-2 text-xs font-mono shadow-lg max-w-md">
-      <div className="text-zinc-100 mb-1">{header}</div>
-      {row.mark != null && (
-        <div className="text-zinc-300">
-          mark (carry-fwd): {fmtPrice(row.mark, 4)}
-        </div>
-      )}
-      {row.mm_mark != null && (
-        <div className="text-zinc-400">
-          mm_mark: {fmtPrice(row.mm_mark, 4)}
-        </div>
-      )}
-      {row.hf_mark != null && (
-        <div className="text-zinc-400">
-          hf_mark: {fmtPrice(row.hf_mark, 4)}
-        </div>
-      )}
-      {row.info && row.phase === "MM" && (
-        <div className="text-amber-300 mt-1 whitespace-pre-wrap">
-          info: {row.info}
-        </div>
-      )}
-      {fills.length > 0 && (
-        <div className="mt-1.5 border-t border-zinc-800 pt-1.5">
-          <div className="text-zinc-500 mb-1">
-            {fills.length} fill{fills.length > 1 ? "s" : ""}
-          </div>
-          {fills.map((f, i) => {
-            const buyerColor = agentColors[f.buyer] || "#a1a1aa";
-            const sellerColor = agentColors[f.seller] || "#a1a1aa";
-            const hfIsBuyer = hfAccountSet.has(f.buyer);
-            // Highlight the HF taker side for HF-phase fills.
-            const arrow =
-              row.phase === "HF" ? (hfIsBuyer ? "←" : "→") : "↔";
-            return (
-              <div
-                key={`${f.xIndex}-${i}`}
-                className="text-zinc-300 flex items-center gap-1"
-              >
-                <span style={{ color: buyerColor }}>{f.buyer}</span>
-                <span className="text-zinc-500">{arrow}</span>
-                <span style={{ color: sellerColor }}>{f.seller}</span>
-                <span className="text-zinc-500">@</span>
-                <span className="text-zinc-100">{fmtPrice(f.price, 4)}</span>
-                <span className="text-zinc-500">×</span>
-                <span className="text-zinc-100">{f.size}</span>
-              </div>
-            );
-          })}
-        </div>
-      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { CycleRow, Episode } from "../types";
+import type { PhaseRow, Episode } from "../types";
 import { fmtInt, fmtPnl, pnlClass } from "../lib/format";
 import { Card, RoleBadge, SectionHeader, StatPill } from "./ui";
 
@@ -13,17 +13,17 @@ export function EpisodeOverview({
   dataVersion: number;
   marketId?: string | null;
 }) {
-  const [cycles, setCycles] = useState<CycleRow[]>([]);
+  const [phases, setPhases] = useState<PhaseRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     api
-      .cycles(marketId)
-      .then(setCycles)
+      .phases(marketId)
+      .then(setPhases)
       .catch((e) => setErr(e?.message || String(e)));
   }, [dataVersion, marketId]);
 
-  const { contract, stats, accounts, settled, num_cycles } = episode;
+  const { contract, stats, accounts, settled, phase_count } = episode;
 
   // App.tsx guards episode.loaded, so contract should always be non-null
   // here. Defensive bail-out for type safety.
@@ -34,7 +34,7 @@ export function EpisodeOverview({
   const mmCount = accounts.filter((a) => a.role === "MM").length;
   const hfCount = accounts.filter((a) => a.role === "HF").length;
 
-  const infoEvents = cycles.filter((c) => !!c.info);
+  const infoEvents = phases.filter((p) => !!p.info);
 
   return (
     <div className="space-y-6">
@@ -70,7 +70,7 @@ export function EpisodeOverview({
       />
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatPill label="Cycles" value={fmtInt(num_cycles)} />
+        <StatPill label="Phases" value={fmtInt(phase_count ?? 0)} />
         <StatPill
           label="Agents"
           value={fmtInt(accounts.length)}
@@ -102,7 +102,7 @@ export function EpisodeOverview({
         <StatPill
           label="Info Events"
           value={fmtInt(infoEvents.length)}
-          sub={infoEvents.length > 0 ? `cycles ${infoEvents.map((c) => c.cycle_index).join(", ")}` : "none"}
+          sub={infoEvents.length > 0 ? `phases ${infoEvents.map((p) => p.phase_id.slice(0, 8)).join(", ")}` : "none"}
         />
         <StatPill
           label="Traces"
@@ -165,15 +165,15 @@ export function EpisodeOverview({
       {infoEvents.length > 0 && (
         <Card title="Information schedule">
           <ol className="space-y-3">
-            {infoEvents.map((c) => (
+            {infoEvents.map((p) => (
               <li
-                key={c.cycle_index}
+                key={p.phase_id}
                 className="flex gap-3 text-sm text-zinc-300"
               >
-                <div className="shrink-0 w-16 text-[10px] uppercase tracking-widest text-zinc-500 pt-0.5">
-                  Cycle {c.cycle_index}
+                <div className="shrink-0 w-28 text-[10px] uppercase tracking-widest text-zinc-500 pt-0.5">
+                  {new Date(p.timestamp * 1000).toLocaleString()} ({p.phase_type})
                 </div>
-                <div className="whitespace-pre-wrap">{c.info}</div>
+                <div className="whitespace-pre-wrap">{p.info}</div>
               </li>
             ))}
           </ol>

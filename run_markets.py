@@ -6,9 +6,9 @@ Reads `markets.yaml` (market definitions + global phase duration) and
 state to a SQLite database and drives the global wall-clock supervisor that
 advances every market on each phase tick.
 
-Markets remain in `RUNNING` state until they hit `num_cycles`, at which
-point they enter `PENDING_SETTLEMENT`. Run `settle.py --market <id> --value
-<float>` to finalize a market and write its lifetime stats.
+Markets remain in `RUNNING` state until they hit their settlement datetime,
+at which point they enter `PENDING_SETTLEMENT`. Run `settle.py --market <id>
+--value <float>` to finalize a market and write its lifetime stats.
 
 Usage:
     OPENROUTER_API_KEY=sk-... python3 run_markets.py
@@ -24,6 +24,9 @@ from typing import Any
 
 # Make the modelx package importable when run from the repo root.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from modelx.agents.base import Agent
 from modelx.agents.openrouter import OpenRouterAgent
@@ -74,16 +77,16 @@ async def _run(args: Any) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--markets", default="markets.yaml",
-        help="markets config (YAML, default: markets.yaml)",
+        "--markets", default=os.environ.get("MARKETS_YAML", "markets.yaml"),
+        help="markets config (YAML, default: $MARKETS_YAML or markets.yaml)",
     )
     parser.add_argument(
-        "--agents", default="agents.yaml",
-        help="agents config (YAML, default: agents.yaml)",
+        "--agents", default=os.environ.get("AGENTS_YAML", "agents.yaml"),
+        help="agents config (YAML, default: $AGENTS_YAML or agents.yaml)",
     )
     parser.add_argument(
-        "--db", default="modelx.db",
-        help="SQLite db path (default: modelx.db)",
+        "--db", default=os.environ.get("DB_PATH", "modelx.db"),
+        help="SQLite db path (default: $DB_PATH or modelx.db)",
     )
     args = parser.parse_args()
 

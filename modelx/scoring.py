@@ -1,21 +1,18 @@
-"""Per-account MM and HF metrics for a settled contract.
+"""Per-account MM and HF metrics.
 
 Two entry points: `score_mm` and `score_hf`. Each returns a dict
-`{account_id: Scores}` built by walking the list of `Cycle` objects from
-the runner. MMs are discovered from submitted quotes; HFs from submitted
-orders. The contract must have `settlement_value` set — otherwise the
-functions raise ValueError.
+`{account_id: Scores}`. PnL is always available via mark-to-market
+(uses settlement_value when settled, otherwise the latest mark).
 
 Lifetime scoring (`score_lifetime` / `list_lifetime_by_account`) aggregates
-across multiple settled markets by reading rows from `agent_lifetime_stats`,
-which `settle.py` writes one per (account, market) when a market settles.
+across multiple settled markets by reading rows from `agent_lifetime_stats`.
 """
 
 import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
-from .cycle import Cycle
+from .phase import Phase
 from .db import list_lifetime_stats
 from .models import Contract, Fill, LifetimeStat
 
@@ -30,9 +27,9 @@ class MMScores:
     pnl_bps: float
     uptime: float
     consensus: float
-    markout_1: float
-    markout_5: float
-    markout_20: float
+    markout_2: float
+    markout_10: float
+    markout_40: float
     avg_abs_position: float
     self_cross_count: int
     self_cross_volume: int
@@ -43,34 +40,39 @@ class HFScores:
     account_id: str
     total_pnl: float
     sharpe: float
-    markout_1: float
-    markout_5: float
-    markout_20: float
+    markout_2: float
+    markout_10: float
+    markout_40: float
 
 
 # ---------- entry points ----------
 
 def score_mm(
     fills: List[Fill],
-    cycles: List[Cycle],
+    phases: List[Phase],
     positions: Dict[str, int],
     contract: Contract,
+    latest_mark: float = 0.0,
 ) -> Dict[str, MMScores]:
-    """Return per-MM scores for a settled contract."""
-    settlement = _require_settlement(contract)
-    marks = _carry_mark_forward(cycles)
-    mm_accounts = _mm_accounts(cycles)
-    total_market_volume = sum(f.size for f in fills)
+    """Return per-MM scores. Uses settlement_value if available, else latest_mark."""
+    mark = float(contract.settlement_value) if contract.settlement_value else latest_mark
+    marks = _carry_mark_forward(phases)
+    mm_accounts = _mm_accounts(phases)
+
+    # Volume share: denominator is total MM-phase volume only.
+    mm_fills = [f for f in fills if f.phase == "MM"]
+    total_mm_volume = sum(f.size for f in mm_fills)
 
     result: Dict[str, MMScores] = {}
     for acct in sorted(mm_accounts):
-        pnl_series = _cycle_pnl_series(cycles, marks, acct, contract.multiplier)
+        pnl_series = _phase_pnl_series(phases, marks, acct, contract.multiplier)
         volume = _account_volume(fills, acct)
-        total_pnl = _realized_pnl(
-            fills, positions.get(acct, 0), acct, settlement, contract.multiplier,
+        total_pnl = _pnl(
+            fills, positions.get(acct, 0), acct, mark, contract.multiplier,
         )
         pnl_bps_val = 10000.0 * total_pnl / volume if volume > 0 else 0.0
-        vol_share = volume / total_market_volume if total_market_volume > 0 else 0.0
+        mm_acct_vol = _account_volume(mm_fills, acct)
+        vol_share = mm_acct_vol / total_mm_volume if total_mm_volume > 0 else 0.0
         self_count, self_vol = _self_crosses(fills, acct)
         result[acct] = MMScores(
             account_id=acct,
@@ -79,12 +81,12 @@ def score_mm(
             volume=volume,
             volume_share=vol_share,
             pnl_bps=pnl_bps_val,
-            uptime=_uptime(cycles, acct),
+            uptime=_uptime(phases, acct),
             consensus=_consensus(fills, acct, mm_accounts),
-            markout_1=_markout(cycles, marks, acct, 1),
-            markout_5=_markout(cycles, marks, acct, 5),
-            markout_20=_markout(cycles, marks, acct, 20),
-            avg_abs_position=_avg_abs_position(cycles, acct),
+            markout_2=_markout(phases, marks, acct, 2),
+            markout_10=_markout(phases, marks, acct, 10),
+            markout_40=_markout(phases, marks, acct, 40),
+            avg_abs_position=_avg_abs_position(phases, acct),
             self_cross_count=self_count,
             self_cross_volume=self_vol,
         )
@@ -93,78 +95,67 @@ def score_mm(
 
 def score_hf(
     fills: List[Fill],
-    cycles: List[Cycle],
+    phases: List[Phase],
     positions: Dict[str, int],
     contract: Contract,
+    latest_mark: float = 0.0,
 ) -> Dict[str, HFScores]:
-    """Return per-HF scores for a settled contract."""
-    settlement = _require_settlement(contract)
-    marks = _carry_mark_forward(cycles)
-    hf_accounts = _hf_accounts(cycles)
+    """Return per-HF scores. Uses settlement_value if available, else latest_mark."""
+    mark = float(contract.settlement_value) if contract.settlement_value else latest_mark
+    marks = _carry_mark_forward(phases)
+    hf_accounts = _hf_accounts(phases)
 
     result: Dict[str, HFScores] = {}
     for acct in sorted(hf_accounts):
-        pnl_series = _cycle_pnl_series(cycles, marks, acct, contract.multiplier)
-        total_pnl = _realized_pnl(
-            fills, positions.get(acct, 0), acct, settlement, contract.multiplier,
+        pnl_series = _phase_pnl_series(phases, marks, acct, contract.multiplier)
+        total_pnl = _pnl(
+            fills, positions.get(acct, 0), acct, mark, contract.multiplier,
         )
         result[acct] = HFScores(
             account_id=acct,
             total_pnl=total_pnl,
             sharpe=_sharpe(pnl_series),
-            markout_1=_markout(cycles, marks, acct, 1),
-            markout_5=_markout(cycles, marks, acct, 5),
-            markout_20=_markout(cycles, marks, acct, 20),
+            markout_2=_markout(phases, marks, acct, 2),
+            markout_10=_markout(phases, marks, acct, 10),
+            markout_40=_markout(phases, marks, acct, 40),
         )
     return result
 
 
 # ---------- helpers ----------
 
-def _require_settlement(contract: Contract) -> float:
-    if contract.settlement_value is None:
-        raise ValueError(
-            f"score: contract {contract.id!r} has no settlement_value set"
-        )
-    return float(contract.settlement_value)
+def _mm_accounts(phases: List[Phase]) -> Set[str]:
+    return {q.account_id for p in phases for q in p.quotes}
 
 
-def _mm_accounts(cycles: List[Cycle]) -> Set[str]:
-    return {q.account_id for c in cycles for q in c.quotes}
+def _hf_accounts(phases: List[Phase]) -> Set[str]:
+    return {o.account_id for p in phases for o in p.orders}
 
 
-def _hf_accounts(cycles: List[Cycle]) -> Set[str]:
-    return {o.account_id for c in cycles for o in c.orders}
-
-
-def _carry_mark_forward(cycles: List[Cycle]) -> List[float]:
-    """Last-available mark per cycle, preferring hf_mark, carrying forward on gaps."""
+def _carry_mark_forward(phases: List[Phase]) -> List[float]:
+    """Last-available mark per phase, carrying forward on gaps."""
     marks: List[float] = []
     current = 0.0
-    for c in cycles:
-        m = 0.0
-        if c.state.hf_mark and c.state.hf_mark > 0:
-            m = c.state.hf_mark
-        elif c.state.mm_mark and c.state.mm_mark > 0:
-            m = c.state.mm_mark
-        if m > 0:
+    for p in phases:
+        m = p.state.mark
+        if m and m > 0:
             current = m
         marks.append(current)
     return marks
 
 
-def _cycle_pnl_series(
-    cycles: List[Cycle],
+def _phase_pnl_series(
+    phases: List[Phase],
     marks: List[float],
     account_id: str,
     multiplier: float,
 ) -> List[float]:
-    """Running total PnL at the end of each cycle, mark-to-market at `marks[i]`."""
+    """Running total PnL at the end of each phase, mark-to-market."""
     cash = 0.0
     pos = 0
     out: List[float] = []
-    for i, cycle in enumerate(cycles):
-        for f in cycle.fills:
+    for i, phase in enumerate(phases):
+        for f in phase.fills:
             if f.buyer_account_id == account_id:
                 cash -= f.price * f.size
                 pos += f.size
@@ -176,11 +167,6 @@ def _cycle_pnl_series(
 
 
 def _sharpe(pnls: List[float]) -> float:
-    """Sharpe = total PnL / (sqrt(N) * SD of per-cycle PnL changes).
-
-    Equivalent to the standard mean / std Sharpe scaled by sqrt(N) — the
-    annualized form, treating each cycle as one period.
-    """
     if not pnls:
         return 0.0
     changes = [pnls[0]]
@@ -189,7 +175,7 @@ def _sharpe(pnls: List[float]) -> float:
     n = len(changes)
     if n == 0:
         return 0.0
-    total = sum(changes)  # equals pnls[-1]
+    total = sum(changes)
     mean = total / n
     var = sum((c - mean) ** 2 for c in changes) / n
     std = var ** 0.5
@@ -206,29 +192,32 @@ def _account_volume(fills: List[Fill], account_id: str) -> int:
     return total
 
 
-def _realized_pnl(
+def _pnl(
     fills: List[Fill],
     final_position: int,
     account_id: str,
-    settlement: float,
+    mark: float,
     multiplier: float,
 ) -> float:
+    """PnL = (cash + position * mark) * multiplier."""
     cash = 0.0
     for f in fills:
         if f.buyer_account_id == account_id:
             cash -= f.price * f.size
         if f.seller_account_id == account_id:
             cash += f.price * f.size
-    return (cash + final_position * settlement) * multiplier
+    return (cash + final_position * mark) * multiplier
 
 
-def _uptime(cycles: List[Cycle], account_id: str) -> float:
-    if not cycles:
+def _uptime(phases: List[Phase], account_id: str) -> float:
+    """Fraction of MM phases where the account submitted a quote."""
+    mm_phases = [p for p in phases if p.state.phase_type == "MM"]
+    if not mm_phases:
         return 0.0
     quoted = sum(
-        1 for c in cycles if any(q.account_id == account_id for q in c.quotes)
+        1 for p in mm_phases if any(q.account_id == account_id for q in p.quotes)
     )
-    return quoted / len(cycles)
+    return quoted / len(mm_phases)
 
 
 def _consensus(
@@ -236,11 +225,6 @@ def _consensus(
     account_id: str,
     mm_accounts: Set[str],
 ) -> float:
-    """1 - volume_matched_with_other_MMs / total_order_volume.
-
-    Self-trades are counted in total_order_volume but NOT as matched with
-    another MM, per the spec (self-trades included).
-    """
     total = 0
     with_other_mms = 0
     for f in fills:
@@ -260,27 +244,20 @@ def _consensus(
 
 
 def _markout(
-    cycles: List[Cycle],
+    phases: List[Phase],
     marks: List[float],
     account_id: str,
     n: int,
 ) -> float:
-    """Size-weighted average N-cycle markout for fills involving `account_id`.
-
-    Direction is from the account's perspective (+1 for buys, -1 for sells).
-    Self-trades have net direction 0, so they contribute 0 to the numerator
-    but their size still counts in the denominator.
-    Fills whose target cycle (i+N) is beyond the last cycle are skipped.
-    Returns 0.0 when no fills have N cycles of forward data.
-    """
+    """Size-weighted average N-phase markout for fills involving `account_id`."""
     total_contrib = 0.0
     total_size = 0
-    for i, cycle in enumerate(cycles):
+    for i, phase in enumerate(phases):
         target = i + n
-        if target >= len(cycles):
+        if target >= len(phases):
             continue
         target_mark = marks[target]
-        for f in cycle.fills:
+        for f in phase.fills:
             buyer_is = (f.buyer_account_id == account_id)
             seller_is = (f.seller_account_id == account_id)
             if not buyer_is and not seller_is:
@@ -294,11 +271,11 @@ def _markout(
     return total_contrib / total_size
 
 
-def _avg_abs_position(cycles: List[Cycle], account_id: str) -> float:
-    if not cycles:
+def _avg_abs_position(phases: List[Phase], account_id: str) -> float:
+    if not phases:
         return 0.0
-    total = sum(abs(c.positions.get(account_id, 0)) for c in cycles)
-    return total / len(cycles)
+    total = sum(abs(p.positions.get(account_id, 0)) for p in phases)
+    return total / len(phases)
 
 
 def _self_crosses(fills: List[Fill], account_id: str) -> Tuple[int, int]:
@@ -315,14 +292,13 @@ def _self_crosses(fills: List[Fill], account_id: str) -> Tuple[int, int]:
 
 @dataclass
 class LifetimeScores:
-    """Aggregate stats for one agent across every market they've settled in."""
     account_id: str
-    name: str  # short display name (without market_id prefix)
+    name: str
     markets_traded: int
     total_pnl: float
     total_volume: int
-    avg_sharpe: float       # mean of per-market sharpes (skips Nones)
-    best_market_pnl: float  # 0.0 if no settled markets
+    avg_sharpe: float
+    best_market_pnl: float
     worst_market_pnl: float
     per_market: List[LifetimeStat]
 
@@ -331,9 +307,6 @@ def score_lifetime(
     conn: sqlite3.Connection,
     account_id: str,
 ) -> LifetimeScores:
-    """Aggregate `agent_lifetime_stats` rows for one account into a single
-    `LifetimeScores`. Returns empty/zero values if the account has no
-    settled-market rows yet."""
     rows = list_lifetime_stats(conn, account_id=account_id)
     name = _strip_market_prefix(account_id)
     if not rows:
@@ -361,14 +334,6 @@ def score_lifetime(
 def list_lifetime_by_name(
     conn: sqlite3.Connection,
 ) -> Dict[str, LifetimeScores]:
-    """Return lifetime scores for every agent across all settled markets,
-    keyed by short agent name (with the per-market account_id prefix stripped).
-
-    When the same agent participates in multiple markets, their per-market
-    rows are combined into a single LifetimeScores entry. This is what the
-    dashboard's Lifetime tab consumes — it shows agents, not market-scoped
-    accounts.
-    """
     all_rows = list_lifetime_stats(conn)
     grouped: Dict[str, List[LifetimeStat]] = {}
     for r in all_rows:
@@ -380,7 +345,7 @@ def list_lifetime_by_name(
         pnls = [r.total_pnl or 0.0 for r in rows]
         sharpes = [r.sharpe for r in rows if r.sharpe is not None]
         out[name] = LifetimeScores(
-            account_id=name,  # use short name as the canonical key
+            account_id=name,
             name=name,
             markets_traded=len(rows),
             total_pnl=sum(pnls),
@@ -394,8 +359,6 @@ def list_lifetime_by_name(
 
 
 def _strip_market_prefix(account_id: str) -> str:
-    """`{market_id}:{agent_name}` -> `{agent_name}`. Returns input unchanged
-    if there's no colon (legacy / single-market accounts)."""
     if ":" in account_id:
         return account_id.split(":", 1)[1]
     return account_id

@@ -2,7 +2,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from ..matching import BookLevel
@@ -11,17 +11,16 @@ from ..models import Contract, Order, Quote
 
 @dataclass
 class AgentContext:
-    """Everything an agent needs to make a decision in one cycle.
+    """Everything an agent needs to make a decision in one phase.
 
     `trade_history` and `information_log` are pre-formatted strings produced
-    by the caller (runner / cycle wrapper) so individual Agent implementations
-    stay format-agnostic.
+    by the caller (runner) so individual Agent implementations stay format-agnostic.
     """
     account_id: str
-    cycle_id: str
+    phase_id: str
     contract: Contract
-    cycle_number: int
-    total_cycles: int
+    phase_type: str       # "MM" or "HF"
+    phase_timestamp: float  # epoch seconds of this tick
     position: int
     pnl: float
     trade_history: str

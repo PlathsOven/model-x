@@ -1,21 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { api } from "../api";
 import type { Episode, PositionsResponse } from "../types";
-import {
-  AXIS_COLOR,
-  GRID_COLOR,
-  buildAgentColors,
-} from "../lib/colors";
+import { buildAgentColors } from "../lib/colors";
 import { fmtInt, fmtPnl } from "../lib/format";
+import { Plot, DARK_LAYOUT, PLOTLY_CONFIG } from "../lib/plotly-theme";
 import { Card, SectionHeader } from "./ui";
 
 type Metric = "position" | "pnl" | "cash";
@@ -43,9 +31,7 @@ export function PositionTracker({
       .catch((e) => setErr(e?.message || String(e)));
   }, [dataVersion, marketId]);
 
-  // When new agents appear (e.g. live demo just added one) include them in
-  // the visible selection by default. Don't touch the selection if the user
-  // has explicitly hidden some.
+  // When new agents appear, include them in the visible selection by default.
   useEffect(() => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -60,29 +46,72 @@ export function PositionTracker({
     });
   }, [episode.accounts]);
 
-  const mmAccounts = episode.accounts.filter((a) => a.role === "MM").map((a) => a.id);
-  const hfAccounts = episode.accounts.filter((a) => a.role === "HF").map((a) => a.id);
+  const mmAccounts = episode.accounts
+    .filter((a) => a.role === "MM")
+    .map((a) => a.id);
+  const hfAccounts = episode.accounts
+    .filter((a) => a.role === "HF")
+    .map((a) => a.id);
   const agentColors = useMemo(
     () => buildAgentColors(mmAccounts, hfAccounts),
     [episode]
   );
 
-  const rows = useMemo(() => {
+  const visible = episode.accounts
+    .filter((a) => selected.has(a.id))
+    .map((a) => a.id);
+
+  const fmt =
+    metric === "position" ? fmtInt : metric === "pnl" ? fmtPnl : fmtPnl;
+
+  // Build Plotly traces.
+  const traces = useMemo(() => {
     if (!pos) return [];
-    const agents = Object.keys(pos.agents);
-    if (agents.length === 0) return [];
-    const spine = pos.agents[agents[0]];
-    return spine.map((_, i) => {
-      const row: Record<string, any> = { cycle: spine[i].cycle_index };
-      for (const a of agents) {
-        const p = pos.agents[a][i];
-        if (metric === "position") row[a] = p.position;
-        else if (metric === "pnl") row[a] = p.pnl_realized ?? p.pnl_mtm;
-        else if (metric === "cash") row[a] = p.cash;
-      }
-      return row;
-    });
-  }, [pos, metric]);
+    return visible
+      .filter((a) => pos.agents[a])
+      .map((a) => {
+        const points = pos.agents[a];
+        const yVals = points.map((p) => {
+          if (metric === "position") return p.position;
+          if (metric === "pnl") return p.pnl_realized ?? p.pnl_mtm;
+          return p.cash;
+        });
+        return {
+          x: points.map((p) => new Date(p.timestamp * 1000)),
+          y: yVals,
+          type: "scatter" as const,
+          mode: "lines" as const,
+          name: a,
+          line: { color: agentColors[a], width: 2 },
+          hovertemplate: `${a}<br>${metric}: %{y${metric === "position" ? ":.0f" : ":.4f"}}<br>%{x}<extra></extra>`,
+        };
+      });
+  }, [pos, visible, metric, agentColors]);
+
+  const layout = useMemo(
+    () => ({
+      ...DARK_LAYOUT,
+      xaxis: {
+        ...DARK_LAYOUT.xaxis,
+        type: "date" as const,
+      },
+      yaxis: {
+        ...DARK_LAYOUT.yaxis,
+        tickformat: metric === "position" ? "d" : ".2f",
+      },
+      showlegend: true,
+      legend: {
+        ...DARK_LAYOUT.legend,
+        orientation: "h" as const,
+        x: 0,
+        y: -0.15,
+        xanchor: "left" as const,
+        yanchor: "top" as const,
+      },
+      margin: { t: 20, r: 30, b: 60, l: 60 },
+    }),
+    [metric]
+  );
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -96,14 +125,7 @@ export function PositionTracker({
   if (err)
     return <div className="text-sm text-red-400 font-mono">{err}</div>;
   if (!pos)
-    return <div className="text-sm text-zinc-500">Loading…</div>;
-
-  const visible = episode.accounts
-    .filter((a) => selected.has(a.id))
-    .map((a) => a.id);
-
-  const fmt =
-    metric === "position" ? fmtInt : metric === "pnl" ? fmtPnl : fmtPnl;
+    return <div className="text-sm text-zinc-500">Loading...</div>;
 
   return (
     <div className="space-y-4">
@@ -165,44 +187,14 @@ export function PositionTracker({
       </Card>
 
       <Card>
-        <div className="h-[500px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart
-              data={rows}
-              margin={{ top: 10, right: 30, left: 10, bottom: 10 }}
-            >
-              <CartesianGrid stroke={GRID_COLOR} strokeDasharray="3 3" />
-              <XAxis
-                dataKey="cycle"
-                type="number"
-                domain={[0, Math.max(0, episode.num_cycles - 1)]}
-                allowDecimals={false}
-                stroke={AXIS_COLOR}
-                tick={{ fill: AXIS_COLOR, fontSize: 11 }}
-              />
-              <YAxis
-                stroke={AXIS_COLOR}
-                tick={{ fill: AXIS_COLOR, fontSize: 11 }}
-                tickFormatter={(v) => fmt(v)}
-                width={70}
-              />
-              <Tooltip
-                formatter={(value: any, name: any) => [fmt(value as number), name]}
-                labelFormatter={(l) => `Cycle ${l}`}
-              />
-              {visible.map((a) => (
-                <Line
-                  key={a}
-                  type="monotone"
-                  dataKey={a}
-                  stroke={agentColors[a]}
-                  strokeWidth={2}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
+        <div style={{ width: "100%", height: 500 }}>
+          <Plot
+            data={traces as any}
+            layout={layout as any}
+            config={PLOTLY_CONFIG as any}
+            useResizeHandler
+            style={{ width: "100%", height: "100%" }}
+          />
         </div>
       </Card>
     </div>

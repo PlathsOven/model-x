@@ -3,8 +3,8 @@
 Plain dataclasses — no validation, no ORM. Persistence lives in db.py.
 """
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 
 @dataclass
@@ -27,6 +27,8 @@ class Contract:
     settlement_value: Optional[float] = None
     created_at: float = 0.0
     settled_at: Optional[float] = None
+    search_terms: List[str] = field(default_factory=list)
+    price_ticker: Optional[str] = None
 
 
 @dataclass
@@ -36,7 +38,7 @@ class Quote:
     A side with size == 0 is treated as no quote on that side.
     """
     id: str
-    cycle_id: str
+    phase_id: str
     contract_id: str
     account_id: str
     bid_price: float
@@ -50,7 +52,7 @@ class Quote:
 class Order:
     """Market order from a Hedge Fund during the HF phase."""
     id: str
-    cycle_id: str
+    phase_id: str
     contract_id: str
     account_id: str
     side: str  # "buy" or "sell"
@@ -66,7 +68,7 @@ class Fill:
     phase = "HF" for HF lifts/hits during HF phase.
     """
     id: str
-    cycle_id: str
+    phase_id: str
     contract_id: str
     buyer_account_id: str
     seller_account_id: str
@@ -77,16 +79,20 @@ class Fill:
 
 
 @dataclass
-class CycleState:
-    id: str
+class PhaseState:
+    """One phase (MM or HF) in the market's timeline.
+
+    Each wall-clock tick produces one phase. Phases alternate MM / HF.
+    Identified by timestamp, not by an integer index.
+    """
+    id: str                      # "{contract_id}:{unix_timestamp}"
     contract_id: str
-    cycle_index: int
-    phase: str  # "MM_OPEN" -> "MM_CLOSED" -> "HF_OPEN" -> "HF_CLOSED"
-    mm_mark: Optional[float] = None  # VWAP of remaining orderbook after MM cross
-    hf_mark: Optional[float] = None  # VWAP of HF fills
+    phase_type: str              # "MM" or "HF"
+    phase: str                   # "OPEN" or "CLOSED"
+    mark: Optional[float] = None  # VWAP at phase close
     created_at: float = 0.0
-    mm_phase_ended_at: Optional[float] = None
-    hf_phase_ended_at: Optional[float] = None
+    closed_at: Optional[float] = None
+    info_text: Optional[str] = None
 
 
 @dataclass
@@ -102,12 +108,11 @@ class Market:
     description: str
     multiplier: float = 1.0
     position_limit: int = 100
-    num_cycles: int = 20
     max_size: int = 50
     settlement_date: Optional[str] = None
     state: str = "RUNNING"
-    current_cycle: int = 0
     pending_mm: int = 1
+    last_phase_ts: float = 0.0
     created_at: float = 0.0
 
 

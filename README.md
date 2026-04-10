@@ -4,8 +4,8 @@ A points-based prediction exchange where Large Language Models (and humans) trad
 
 ModelX has two modes:
 
-- **Live multi-market mode** (`run_markets.py`) — the primary path. Runs N markets concurrently on a real-time wall-clock schedule, advances every market on each global tick, persists to SQLite. Settle each market manually with `settle.py` when the real-world value is known.
-- **Demo mode** (`run_demo.py`) — single-market, single-shot, manual `Enter` to advance phases, prompts you for a settlement value at the end. Useful for one-off interactive sessions and tutorials.
+- **Live multi-market mode** (`run_markets.py`) — runs N markets concurrently on a real-time wall-clock schedule, advances every market on each global tick, persists to SQLite. Settle each market manually with `settle.py` when the real-world value is known.
+- **Live news mode** (`run_live.py`) — same architecture as live multi-market mode, but for a single contract powered by real-time data. Pulls headlines from Google News RSS and price bars from yfinance between cycles instead of using a hardcoded info schedule. Uses the same wall-clock supervisor, async agent calls, and SQLite persistence. Settle with `settle.py` when done.
 
 ## Prerequisites
 
@@ -26,10 +26,19 @@ cd model-x
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install httpx pyyaml
+pip install -r requirements.txt
 ```
 
-`httpx` is required to talk to OpenRouter. `pyyaml` is recommended but optional — there's a built-in fallback parser for `agents.yaml` if you skip it.
+Or install manually:
+
+```bash
+pip install httpx pyyaml feedparser yfinance
+```
+
+- `httpx` — required for OpenRouter API calls
+- `pyyaml` — recommended but optional (there's a built-in fallback YAML parser)
+- `feedparser` — required for live news mode (Google News RSS parsing)
+- `yfinance` — required for live news mode (real-time price data)
 
 If you'd rather not use a venv on macOS, append `--break-system-packages` to the pip command.
 
@@ -107,6 +116,54 @@ Field reference:
 
 Every agent in `agents.yaml` participates in **every** market simultaneously, with isolated positions and cash per market.
 
+## Configure a live news contract
+
+For live news mode (`run_live.py`), create or edit `contracts.yaml` in the repo root. This defines a single contract with real-time data sources — same structure as a `markets.yaml` entry, plus news-specific fields:
+
+```yaml
+phase_duration_seconds: 1800   # 30 min — global wall-clock tick, same as markets.yaml
+
+contract:
+  id: sp500-hourly
+  name: "S&P 500 close price"
+  description: "What will the S&P 500 close at today?"
+  search_terms:
+    - "S&P 500"
+    - "US stock market"
+    - "Wall Street"
+  price_ticker: "^GSPC"
+  multiplier: 0.01
+  position_limit: 100
+
+news:
+  sources:
+    - reuters.com
+    - cnbc.com
+    - bloomberg.com
+    - ft.com
+    - wsj.com
+    - bbc.com
+  max_headlines_per_cycle: 10
+
+num_cycles: 20
+settlement_date: "TBD"
+max_size: 50
+```
+
+**Standard fields** — same meaning as `markets.yaml`:
+
+- **`phase_duration_seconds`** (top level) — wall-clock tick interval. The supervisor sleeps until the next aligned boundary, then fires one phase (MM or HF). Set to a few seconds when testing, 1800 (30 min) for production.
+- **`num_cycles`**, **`multiplier`**, **`position_limit`**, **`max_size`**, **`settlement_date`** — same as `markets.yaml` (see above).
+
+**News-specific fields:**
+
+- **`search_terms`** — list of queries sent to Google News RSS. Each term is searched independently; results are merged and deduplicated. More terms = broader coverage, but watch for noise.
+- **`price_ticker`** — a yfinance ticker symbol. The system pulls the last 24 fifteen-minute OHLCV bars before each cycle. Common tickers: `^GSPC` (S&P 500), `^DJI` (Dow), `^IXIC` (Nasdaq), `GC=F` (Gold), `CL=F` (Oil), `^VIX` (VIX), `AAPL` (individual stocks). Set to `null` or omit to skip price data.
+- **`sources`** (under `news:`) — allowed news domains. Headlines from other sources are filtered out. Use this to control quality — major financial outlets tend to produce cleaner, more relevant headlines.
+- **`max_headlines_per_cycle`** (under `news:`) — cap on headlines shown per cycle. Lower values keep the agent context focused; higher values give more breadth.
+
+These news fields also work in `markets.yaml` — add `search_terms`, `price_ticker`, and `news_sources` to any market entry to switch it from static info_schedule to live news.
+
 ## Run live markets
 
 ```bash
@@ -138,6 +195,54 @@ Optional flags:
 
 This writes the settlement value to the contract row, computes `score_mm` / `score_hf` for every participant, persists per-market lifetime stats to the `agent_lifetime_stats` table, and prints a final P&L table. After settlement the market shows up under the **Lifetime** tab in the dashboard, aggregated across every other market the same agent has settled in.
 
+## Run live news mode
+
+For a single market with real-time headlines and price data, using the same supervisor architecture as `run_markets.py`:
+
+```bash
+python3 run_live.py
+```
+
+Optional flags:
+
+- `--contract contracts.yaml` — contract + news config (default: `contracts.yaml`)
+- `--agents agents.yaml` — agents config (default: `agents.yaml`)
+- `--db modelx.db` — SQLite db path (default: `modelx.db`)
+
+This works exactly like `run_markets.py` — it uses the same `MarketSupervisor` wall-clock loop, the same async `MarketRunner`, and the same SQLite persistence. The only difference is the information source: instead of reading from a hardcoded `info_schedule`, the runner fetches live data before each cycle.
+
+Before each MM phase, the system:
+
+1. Fetches headlines from Google News RSS matching the contract's `search_terms`, filtered to only allowed `sources`, and only articles published since the previous cycle
+2. Downloads the latest 15-minute OHLCV bars from yfinance for the contract's `price_ticker` (if configured)
+3. Formats both into a single info block that agents see in their context
+
+Example of what agents receive:
+
+```
+=== PRICE DATA (^GSPC, 15min bars) ===
+2026-04-09 09:30:00: O=5502.31 H=5510.44 L=5498.12 C=5508.77 V=142835000
+2026-04-09 09:45:00: O=5508.77 H=5512.00 L=5505.20 C=5511.33 V=98421000
+...
+
+=== HEADLINES (since 2026-04-09 14:00 UTC) ===
+[Reuters] S&P 500 hits session high as tech rallies (14:32)
+[CNBC] Fed officials signal patience on rate cuts (14:18)
+[Bloomberg] US jobless claims fall to three-month low (14:05)
+```
+
+You can `Ctrl-C` and restart at any time — state resumes from the DB, same as `run_markets.py`. When the market hits `num_cycles` it enters `PENDING_SETTLEMENT`. Settle it with:
+
+```bash
+python3 settle.py --market sp500-hourly --value 5500.0
+```
+
+**Choosing good search terms:** Start broad (e.g. `"S&P 500"`, `"US stock market"`) and add specific terms for events you expect to matter (e.g. `"Fed rate decision"`, `"US jobs report"`). The system deduplicates across terms, so overlap is fine.
+
+**If news or price fetches fail:** The system degrades gracefully. Network errors, missing tickers, or empty RSS feeds produce fallback text ("No new headlines since last cycle." / "Price data unavailable") and the market continues trading.
+
+**Note:** `run_live.py` does not support `model: human` in agents.yaml — human input would block the async event loop.
+
 ## Dashboard
 
 A web dashboard visualizes everything live: per-market timeseries, orderbook, fills, scores, and the cross-market Lifetime tab.
@@ -156,25 +261,6 @@ cd dashboard/frontend && npm install && npm run dev
 The dashboard polls every 2 seconds and live-updates as the runner writes new fills. A market selector dropdown at the top lets you switch between markets; the existing Time Series, Orderbook, Trade Log, Metrics, and Positions tabs all rescope to the selected market. The new **Lifetime** tab is global — it aggregates per-agent stats across every settled market in the database (you'll see it populate after you run `settle.py` on at least one market).
 
 > **Note:** the dashboard server is a long-running Python process that imports `modelx` once at startup. If you upgrade the code (e.g. add a column to a model dataclass), restart the dashboard backend so it re-imports the new classes — otherwise you'll see errors like `Account.__init__() got an unexpected keyword argument 'market_id'`.
-
-## Single-shot demo mode
-
-For a one-off interactive episode (not a persistent live market), use `run_demo.py` instead. It runs a single hard-coded contract, manual `Enter`-to-advance phases, and prompts you for the settlement value at the end:
-
-```bash
-python3 run_demo.py
-```
-
-Optional flags:
-
-- `--config agents.yaml` — agent config (default: `agents.yaml`)
-- `--db modelx.db` — SQLite file to persist the run (default: in-memory)
-- `--traces episode_traces.json` — output path for reasoning traces (default: `episode_traces.json`)
-- `--auto --settlement <float>` — non-interactive mode for scripted runs
-
-To trade something different in demo mode, edit `CONTRACT`, `INFO_SCHEDULE_RAW`, and `NUM_CYCLES` near the top of `run_demo.py`.
-
-You'll see your participants listed, then the cycle loop begins. **Each cycle has 4 manual triggers; press Enter at each to advance.**
 
 ## How a cycle works
 
@@ -228,8 +314,6 @@ python3 settle.py --market cpi-yoy-may-2025 --value 2.8
 ```
 
 The engine writes the value to the contract row, computes per-agent P&L, persists lifetime stats, and prints a final scoring table.
-
-In demo mode (`run_demo.py`), the script prompts you for the settlement value interactively at the end of cycle 19.
 
 A short position makes money if settlement comes in below where they sold; a long position makes money if settlement comes in above where they bought. The engine works out the rest.
 
@@ -373,9 +457,7 @@ Human players don't generate trace entries.
 
 ## Persisting between runs
 
-In live mode, everything persists to `modelx.db` by default (every quote, order, fill, cycle state, market, and account). Restart `run_markets.py` and it resumes from exactly where it left off.
-
-In demo mode (`run_demo.py`), the default is in-memory; pass `--db modelx.db` to persist.
+Everything persists to `modelx.db` by default (every quote, order, fill, cycle state, market, and account). Re-running the same market wipes previous data and starts fresh.
 
 You can open `modelx.db` with any SQLite client (`sqlite3 modelx.db`) and query it directly.
 
@@ -386,3 +468,5 @@ You can open `modelx.db` with any SQLite client (`sqlite3 modelx.db`) and query 
 - **Adding a market mid-run**: add a new entry to `markets.yaml` and restart `run_markets.py`. The new market joins at the next tick; existing markets resume seamlessly from the DB.
 - **Bad model responses**: if an LLM returns malformed JSON, the error prints inline, that agent skips the cycle, and the run continues. In demo mode, the broken response still lands in `episode_traces.json` so you can debug it later.
 - **Dashboard after code updates**: if you pull new code that changes model dataclasses, restart the dashboard server (`python3 dashboard/server.py ...`) so it reimports the updated classes.
+- **Live news mode during market hours**: for equity contracts, run `run_live.py` while the market is open to get the freshest price bars and most active news flow. Outside hours, yfinance returns the most recent available data.
+- **Customizing news contracts**: to trade a different underlying, just update `contracts.yaml` — change the `search_terms`, `price_ticker`, and `multiplier`. For example, gold futures: `price_ticker: "GC=F"`, `search_terms: ["gold price", "precious metals", "gold futures"]`, `multiplier: 0.001`.

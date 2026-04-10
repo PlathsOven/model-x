@@ -120,7 +120,7 @@ def match_mm_phase(
             match = min(bsz, asz)
             fills.append(Fill(
                 id="",
-                cycle_id=cycle_id,
+                phase_id=cycle_id,
                 contract_id=contract_id,
                 buyer_account_id=bq.account_id,
                 seller_account_id=aq.account_id,
@@ -453,7 +453,7 @@ def _walk_book(
                 buyer, seller = book_acct, hf_acct
             fills.append(Fill(
                 id="",
-                cycle_id=cycle_id,
+                phase_id=cycle_id,
                 contract_id=contract_id,
                 buyer_account_id=buyer,
                 seller_account_id=seller,

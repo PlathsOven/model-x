@@ -1,8 +1,7 @@
-# ModelX participant config — read by run_demo.py.
+# ModelX participant config — read by run_live.py.
 # Add or remove agents by editing this file. The script has no hardcoded names.
 #
-# `model: human` uses the CLI HumanAgent (you'll be prompted for each decision).
-# Anything else is an OpenRouter model id and routes through OpenRouterAgent
+# Each model value is an OpenRouter model id routed through OpenRouterAgent.
 # (requires OPENROUTER_API_KEY in your environment).
 
 agents:
@@ -22,12 +21,12 @@ agents:
     model: nvidia/nemotron-3-super-120b-a12b:free
     role: HF
 
-  - name: trinity-large-preview-mm
-    model: arcee-ai/trinity-large-preview:free
+  - name: nemotron-3-nano-30b-a3b-mm
+    model: nvidia/nemotron-3-nano-30b-a3b:free
     role: MM
 
-  - name: trinity-large-preview-hf
-    model: arcee-ai/trinity-large-preview:free
+  - name: nemotron-3-nano-30b-a3b-hf
+    model: nvidia/nemotron-3-nano-30b-a3b:free
     role: HF
 
   # - name: glm-4.5-air-mm

@@ -17,7 +17,6 @@ export function ReasoningTraces({
   const [err, setErr] = useState<string | null>(null);
   const [agentFilter, setAgentFilter] = useState<string>("ALL");
   const [phaseFilter, setPhaseFilter] = useState<PhaseFilter>("ALL");
-  const [cycleFilter, setCycleFilter] = useState<number | "ALL">("ALL");
 
   useEffect(() => {
     api
@@ -41,9 +40,9 @@ export function ReasoningTraces({
       }
     }
     out.sort((a, b) => {
-      if (a.cycle_number !== b.cycle_number)
-        return a.cycle_number - b.cycle_number;
-      // MM before HF within a cycle
+      if (a.timestamp !== b.timestamp)
+        return a.timestamp - b.timestamp;
+      // MM before HF within the same timestamp
       if (a.phase !== b.phase) return a.phase === "MM" ? -1 : 1;
       return a.agent_id.localeCompare(b.agent_id);
     });
@@ -54,10 +53,9 @@ export function ReasoningTraces({
     return flat.filter((t) => {
       if (agentFilter !== "ALL" && t.agent_id !== agentFilter) return false;
       if (phaseFilter !== "ALL" && t.phase !== phaseFilter) return false;
-      if (cycleFilter !== "ALL" && t.cycle_number !== cycleFilter) return false;
       return true;
     });
-  }, [flat, agentFilter, phaseFilter, cycleFilter]);
+  }, [flat, agentFilter, phaseFilter]);
 
   if (err)
     return <div className="text-sm text-red-400 font-mono">{err}</div>;
@@ -76,9 +74,9 @@ export function ReasoningTraces({
             <AlertCircle className="text-amber-400" />
             <div>No traces file loaded.</div>
             <div className="text-xs text-zinc-600">
-              Re-run the demo with{" "}
+              Re-run with{" "}
               <code className="font-mono text-zinc-400">
-                python3 run_demo.py --traces episode_traces.json
+                python3 run_live.py
               </code>{" "}
               and restart (or click Reload).
             </div>
@@ -89,9 +87,6 @@ export function ReasoningTraces({
   }
 
   const agentIds = Object.keys(traces.agents).sort();
-  const cycleNumbers = Array.from(
-    new Set(flat.map((t) => t.cycle_number))
-  ).sort((a, b) => a - b);
 
   return (
     <div className="space-y-4">
@@ -138,32 +133,12 @@ export function ReasoningTraces({
             ))}
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-zinc-500 uppercase tracking-widest text-[10px]">
-              Cycle
-            </span>
-            <button
-              onClick={() => setCycleFilter("ALL")}
-              className={filterBtn(cycleFilter === "ALL")}
-            >
-              ALL
-            </button>
-            {cycleNumbers.map((c) => (
-              <button
-                key={c}
-                onClick={() => setCycleFilter(c)}
-                className={filterBtn(cycleFilter === c)}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
         </div>
       </Card>
 
       <div className="space-y-3">
         {filtered.map((t, idx) => (
-          <TraceCard key={`${t.agent_id}-${t.cycle_number}-${t.phase}-${idx}`} trace={t} />
+          <TraceCard key={`${t.agent_id}-${t.phase_id}-${t.phase}-${idx}`} trace={t} />
         ))}
         {filtered.length === 0 && (
           <EmptyState>No traces match the current filters.</EmptyState>
@@ -203,7 +178,7 @@ function TraceCard({
     >
       <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-2.5">
         <div className="flex items-center gap-2 min-w-0">
-          <Badge tone="violet">Cycle {trace.cycle_number}</Badge>
+          <Badge tone="violet">{new Date(trace.timestamp * 1000).toLocaleString()}</Badge>
           <Badge tone={trace.phase === "MM" ? "orange" : "blue"}>{trace.phase}</Badge>
           <RoleBadge role={trace.role} />
           <span className="text-sm font-mono text-zinc-200 truncate">

@@ -1,12 +1,12 @@
 # ModelX Debug Dashboard
 
 A read-only local web dashboard for inspecting ModelX episodes. Reads the SQLite
-database written by `run_demo.py` and the JSON reasoning traces written with
+database written by `run_live.py` and the JSON reasoning traces written with
 `--traces`, and renders seven cross-referenced views for post-mortem debugging.
 
 The dashboard never writes to either data source. It is safe to start the
 dashboard *before* the data exists — every view auto-populates as
-`run_demo.py` writes new cycles to disk (see [Live updates](#live-updates)).
+`run_live.py` writes new cycles to disk (see [Live updates](#live-updates)).
 
 ## Views
 
@@ -46,7 +46,7 @@ frontend renders a "Waiting for ModelX data…" screen until data appears.
 
 Flags:
 
-- `--db PATH` (default `modelx.db`) — SQLite database written by `run_demo.py`.
+- `--db PATH` (default `modelx.db`) — SQLite database written by `run_live.py`.
   May not exist yet.
 - `--traces PATH` (default `episode_traces.json`) — optional traces JSON.
   Missing traces degrade gracefully: the Reasoning view shows an empty-state,
@@ -58,7 +58,7 @@ Flags:
 From the repo root, in any other terminal:
 
 ```bash
-python3 run_demo.py --db modelx.db --traces episode_traces.json
+python3 run_live.py --db modelx.db --traces episode_traces.json
 ```
 
 You can point the dashboard at any prior run's `modelx.db` /
@@ -86,7 +86,7 @@ npm run build
 
 ## Live updates
 
-The dashboard is designed to be left running while `run_demo.py` writes new
+The dashboard is designed to be left running while `run_live.py` writes new
 cycles to disk. There is no manual reload step in the common case.
 
 **Backend auto-reload (mtime-driven).** Every API request checks the mtimes of
@@ -175,11 +175,11 @@ by `POST /api/reload`. The loader never raises; missing or empty data
 produces a sentinel `AppState` with a `status` field that the frontend turns
 into a waiting screen and a sidebar status pill.
 
-### Single-contract assumption
+### Multi-market support
 
-`run_demo.py` only ever writes a single contract per database. The dashboard
-picks the first row from `SELECT id FROM contracts ORDER BY created_at, id`
-and ignores any additional contracts.
+The dashboard supports multiple markets via the `markets` table. Each market
+gets its own `MarketAppState` and every per-market endpoint accepts an optional
+`?market_id=` query param. Without that param, the first market is used.
 
 ### Frontend stack
 
@@ -233,6 +233,6 @@ sqlite3 modelx.db "SELECT phase, COUNT(*) FROM fills GROUP BY phase"
   `App.tsx` (`POLL_INTERVAL_MS`). Fast enough to feel live during a cycle,
   slow enough to be unobtrusive between cycles.
 - SQLite's default rollback-journal mode is safe for concurrent reads while
-  `run_demo.py` writes — readers see a consistent snapshot as of the last
+  `run_live.py` writes — readers see a consistent snapshot as of the last
   commit. If a reload fires mid-commit it may briefly see one fewer cycle;
   the next 2s poll catches up.

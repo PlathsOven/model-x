@@ -9,8 +9,40 @@ documented format so the rest of the package keeps working without the dep.
 """
 
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+
+def parse_settlement_date(raw: str) -> Optional[datetime]:
+    """Parse a settlement date/timestamp string into a timezone-aware datetime.
+
+    Handles formats like:
+      "2026-04-10 16:00:00T-04:00"  (space before time, T before offset)
+      "2026-04-10T16:00:00-04:00"   (standard ISO 8601)
+      "2026-04-10 16:00:00-04:00"   (space separator, no T before offset)
+
+    Returns None for unparseable values (e.g. "TBD", plain dates "2025-06-11").
+    """
+    if not raw or raw.upper() == "TBD":
+        return None
+    # Normalize: replace space between date and time with T, strip T before tz offset
+    normalized = re.sub(
+        r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})",
+        r"\1T\2",
+        raw,
+    )
+    # Remove a stray T immediately before a +/- timezone offset
+    normalized = re.sub(r"T([+-]\d{2})", r"\1", normalized)
+    try:
+        dt = datetime.fromisoformat(normalized)
+        # Only return timezone-aware datetimes (full timestamps).
+        # Plain dates like "2025-06-11" parse as naive and are not usable
+        # for time-based termination.
+        return dt if dt.tzinfo is not None else None
+    except (ValueError, TypeError):
+        return None
 
 
 @dataclass
@@ -28,9 +60,16 @@ class MarketConfig:
     settlement_date: str
     multiplier: float
     position_limit: int
-    num_cycles: int
     max_size: int
+    settlement_datetime: Optional[datetime] = None
     info_schedule: Dict[int, List[str]] = field(default_factory=dict)
+    # Live news fields — when search_terms is non-empty, the market runner
+    # fetches real-time headlines + price data instead of using info_schedule.
+    search_terms: List[str] = field(default_factory=list)
+    price_ticker: Optional[str] = None
+    news_sources: List[str] = field(default_factory=list)
+    max_headlines_per_cycle: int = 10
+    news_lookback_phases: int = 2
 
 
 @dataclass
@@ -59,8 +98,11 @@ def load_config(markets_path: str, agents_path: str) -> GlobalConfig:
 
     phase = markets_data.get("phase_duration_seconds")
     if phase is None:
+        phase = os.environ.get("PHASE_DURATION_SECONDS")
+    if phase is None:
         raise ValueError(
-            f"{markets_path}: missing top-level 'phase_duration_seconds'"
+            f"{markets_path}: missing top-level 'phase_duration_seconds' "
+            f"(and PHASE_DURATION_SECONDS env var is not set)"
         )
     try:
         phase_seconds = float(phase)
@@ -86,8 +128,7 @@ def load_config(markets_path: str, agents_path: str) -> GlobalConfig:
         if spec.model == "human":
             raise ValueError(
                 f"{agents_path}: agent {spec.name!r} uses model='human' which is "
-                f"incompatible with live multi-market runs (would block the event loop). "
-                f"Use run_demo.py for human-in-the-loop episodes."
+                f"incompatible with live multi-market runs (would block the event loop)."
             )
 
     return GlobalConfig(
@@ -107,8 +148,7 @@ def _parse_markets(raw: Any, path: str) -> List[MarketConfig]:
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
             raise ValueError(f"{path}: markets[{i}] must be a mapping")
-        for key in ("id", "name", "description", "settlement_date",
-                    "num_cycles"):
+        for key in ("id", "name", "description", "settlement_date"):
             if key not in item:
                 raise ValueError(
                     f"{path}: markets[{i}] missing required key {key!r}"
@@ -122,16 +162,33 @@ def _parse_markets(raw: Any, path: str) -> List[MarketConfig]:
             item.get("info_schedule") or {}, path, market_id,
         )
 
+        # Live news fields (optional).
+        raw_terms = item.get("search_terms") or []
+        if isinstance(raw_terms, str):
+            raw_terms = [raw_terms]
+        raw_sources = item.get("news_sources") or []
+        if isinstance(raw_sources, str):
+            raw_sources = [raw_sources]
+
+        settlement_date_str = str(item["settlement_date"])
         out.append(MarketConfig(
             id=market_id,
             name=str(item["name"]),
             description=str(item["description"]),
-            settlement_date=str(item["settlement_date"]),
+            settlement_date=settlement_date_str,
             multiplier=float(item.get("multiplier", 1.0)),
             position_limit=int(item.get("position_limit", 100)),
-            num_cycles=int(item["num_cycles"]),
             max_size=int(item.get("max_size", 50)),
+            settlement_datetime=parse_settlement_date(settlement_date_str),
             info_schedule=info_schedule,
+            search_terms=[str(s) for s in raw_terms],
+            price_ticker=str(item["price_ticker"]) if item.get("price_ticker") else None,
+            news_sources=[str(s) for s in raw_sources],
+            max_headlines_per_cycle=int(item.get(
+                "max_headlines_per_cycle",
+                os.environ.get("MAX_HEADLINES_PER_CYCLE", "10"),
+            )),
+            news_lookback_phases=int(item.get("news_lookback_phases", 2)),
         ))
     return out
 

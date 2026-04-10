@@ -64,7 +64,7 @@ export default function App() {
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloading, setReloading] = useState(false);
-  const [focusCycle, setFocusCycle] = useState<number | null>(null);
+  const [focusPhaseId, setFocusPhaseId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now() / 1000);
 
   // Multi-market state. `marketsList` is the dropdown source, `marketId`
@@ -136,8 +136,8 @@ export default function App() {
     }
   };
 
-  const jumpToCycle = useCallback((cycle: number, view?: ViewKey) => {
-    setFocusCycle(cycle);
+  const jumpToPhase = useCallback((phaseId: string, view?: ViewKey) => {
+    setFocusPhaseId(phaseId);
     if (view) setActive(view);
   }, []);
 
@@ -295,8 +295,8 @@ export default function App() {
               <TimeSeriesChart
                 episode={episode}
                 dataVersion={dataVersion}
-                focusCycle={focusCycle}
-                onClearFocus={() => setFocusCycle(null)}
+                focusPhaseId={focusPhaseId}
+                onClearFocus={() => setFocusPhaseId(null)}
                 marketId={marketId}
               />
             )}
@@ -304,7 +304,7 @@ export default function App() {
               <TradeLog
                 episode={episode}
                 dataVersion={dataVersion}
-                onCycleClick={(c) => jumpToCycle(c, "timeseries")}
+                onPhaseClick={(phaseId) => jumpToPhase(phaseId, "timeseries")}
                 marketId={marketId}
               />
             )}
@@ -312,7 +312,7 @@ export default function App() {
               <OrderbookViewer
                 episode={episode}
                 dataVersion={dataVersion}
-                initialCycle={focusCycle ?? 0}
+                initialPhaseId={focusPhaseId ?? undefined}
                 marketId={marketId}
               />
             )}
@@ -385,9 +385,6 @@ function MarketSelector({
           >
             {selected.state.toLowerCase().replace("_", " ")}
           </span>
-          <span>
-            cycle {selected.current_cycle} / {selected.num_cycles}
-          </span>
           {selected.settlement_date && (
             <span>· settles {selected.settlement_date}</span>
           )}
@@ -433,8 +430,7 @@ function WaitingScreen({ episode }: { episode: Episode }) {
           will populate automatically once the database has at least one
           contract. Generate it with{" "}
           <code className="font-mono text-zinc-400">
-            python3 run_demo.py --db {episode.sources.db_path} --traces{" "}
-            {episode.sources.traces_path}
+            python3 run_live.py --db {episode.sources.db_path}
           </code>
           .
         </p>

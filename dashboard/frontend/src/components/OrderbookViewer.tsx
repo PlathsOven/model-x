@@ -1,63 +1,82 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { api } from "../api";
-import type { Episode, Orderbook } from "../types";
+import type { Episode, Orderbook, PhaseRow } from "../types";
 import { fmtInt, fmtPrice } from "../lib/format";
 import { Badge, Card, EmptyState, SectionHeader } from "./ui";
+
+function fmtTimestamp(epoch: number): string {
+  const d = new Date(epoch * 1000);
+  return d.toLocaleString();
+}
 
 export function OrderbookViewer({
   episode,
   dataVersion,
-  initialCycle = 0,
+  initialPhaseId,
   marketId,
 }: {
   episode: Episode;
   dataVersion: number;
-  initialCycle?: number;
+  initialPhaseId?: string;
   marketId?: string | null;
 }) {
-  const lastCycle = Math.max(0, episode.num_cycles - 1);
-  const [cycle, setCycle] = useState<number>(
-    Math.max(0, Math.min(initialCycle, lastCycle))
-  );
+  const [phaseList, setPhaseList] = useState<PhaseRow[]>([]);
+  const [selectedIdx, setSelectedIdx] = useState<number>(0);
   const [ob, setOb] = useState<Orderbook | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  // Re-fetch on every data-version change AND on every cycle change. The
-  // useEffect dep on dataVersion makes the orderbook live-updating: each
-  // poll that bumps the backend's loaded_at re-pulls the current cycle.
+  // Fetch the phase list for the slider.
   useEffect(() => {
-    if (episode.num_cycles === 0) {
+    api
+      .phases(marketId)
+      .then((phases) => {
+        setPhaseList(phases);
+        // If an initial phase was requested, find its index.
+        if (initialPhaseId) {
+          const idx = phases.findIndex((p) => p.phase_id === initialPhaseId);
+          if (idx >= 0) setSelectedIdx(idx);
+        } else if (phases.length > 0) {
+          setSelectedIdx(phases.length - 1);
+        }
+      })
+      .catch((e) => setErr(e?.message || String(e)));
+  }, [dataVersion, marketId]);
+
+  const currentPhase = phaseList[selectedIdx] ?? null;
+  const lastIdx = Math.max(0, phaseList.length - 1);
+
+  // Re-fetch orderbook on every phase selection change.
+  useEffect(() => {
+    if (!currentPhase) {
       setOb(null);
       return;
     }
     setErr(null);
     api
-      .orderbook(cycle, marketId)
+      .orderbook(currentPhase.phase_id, marketId)
       .then(setOb)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [cycle, dataVersion, episode.num_cycles, marketId]);
+  }, [currentPhase?.phase_id, dataVersion, marketId]);
 
-  // Auto-clamp cycle if the dataset shrank under us (e.g. user pointed at
-  // a different db that has fewer cycles).
+  // Auto-clamp if the dataset shrank.
   useEffect(() => {
-    setCycle((c) => Math.max(0, Math.min(c, lastCycle)));
-  }, [lastCycle]);
+    setSelectedIdx((c) => Math.max(0, Math.min(c, lastIdx)));
+  }, [lastIdx]);
 
-  const clamp = (c: number) => Math.max(0, Math.min(c, lastCycle));
+  const clamp = (c: number) => Math.max(0, Math.min(c, lastIdx));
 
-  // Empty state — contract loaded but no cycles yet (or contract has zero
-  // recorded cycles). The slider would have max=-1 and break Recharts.
-  if (episode.num_cycles === 0) {
+  // Empty state -- no phases yet.
+  if (phaseList.length === 0) {
     return (
       <div className="space-y-4">
         <SectionHeader
           title="Orderbook viewer"
-          subtitle="Per-cycle snapshot — quotes, MM crosses, residual book, HF orders, HF fills"
+          subtitle="Per-phase snapshot — quotes, MM crosses, residual book, HF orders, HF fills"
         />
         <EmptyState>
-          No cycles yet. Once <code className="font-mono">run_demo.py</code>{" "}
-          writes its first cycle, the orderbook will appear here automatically.
+          No phases yet. Once <code className="font-mono">run_live.py</code>{" "}
+          writes its first phase, the orderbook will appear here automatically.
         </EmptyState>
       </div>
     );
@@ -90,8 +109,8 @@ export function OrderbookViewer({
       <Card>
         <div className="flex items-center gap-4">
           <button
-            onClick={() => setCycle((c) => clamp(c - 1))}
-            disabled={cycle === 0}
+            onClick={() => setSelectedIdx((c) => clamp(c - 1))}
+            disabled={selectedIdx === 0}
             className="p-2 rounded border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 disabled:opacity-30"
           >
             <ChevronLeft size={16} />
@@ -100,18 +119,20 @@ export function OrderbookViewer({
             <input
               type="range"
               min={0}
-              max={lastCycle}
-              value={cycle}
-              onChange={(e) => setCycle(Number(e.target.value))}
+              max={lastIdx}
+              value={selectedIdx}
+              onChange={(e) => setSelectedIdx(Number(e.target.value))}
               className="w-full accent-emerald-500"
             />
           </div>
-          <div className="font-mono text-sm tabular text-zinc-200 min-w-[5rem] text-right">
-            cycle {cycle} / {lastCycle}
+          <div className="font-mono text-sm tabular text-zinc-200 min-w-[12rem] text-right">
+            {currentPhase
+              ? `${currentPhase.phase_type} ${fmtTimestamp(currentPhase.timestamp)} (${selectedIdx + 1}/${phaseList.length})`
+              : `${selectedIdx + 1} / ${phaseList.length}`}
           </div>
           <button
-            onClick={() => setCycle((c) => clamp(c + 1))}
-            disabled={cycle >= lastCycle}
+            onClick={() => setSelectedIdx((c) => clamp(c + 1))}
+            disabled={selectedIdx >= lastIdx}
             className="p-2 rounded border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 disabled:opacity-30"
           >
             <ChevronRight size={16} />
@@ -124,23 +145,21 @@ export function OrderbookViewer({
       )}
 
       {!ob && !err && (
-        <div className="text-sm text-zinc-500">Loading cycle {cycle}…</div>
+        <div className="text-sm text-zinc-500">Loading phase…</div>
       )}
 
       {ob && (
         <>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <Card title="Phase">
+            <Card title="Phase type">
+              <div className="text-lg font-semibold tabular">{ob.phase_type}</div>
+            </Card>
+            <Card title="Status">
               <div className="text-lg font-semibold tabular">{ob.phase}</div>
             </Card>
-            <Card title="MM mark">
+            <Card title="Mark">
               <div className="text-lg font-semibold tabular">
-                {fmtPrice(ob.mm_mark, 4)}
-              </div>
-            </Card>
-            <Card title="HF mark">
-              <div className="text-lg font-semibold tabular">
-                {fmtPrice(ob.hf_mark, 4)}
+                {fmtPrice(ob.mark, 4)}
               </div>
             </Card>
           </div>
@@ -312,7 +331,7 @@ export function OrderbookViewer({
             </table>
           </Card>
 
-          <Card title="Positions after cycle">
+          <Card title="Positions after phase">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm tabular">
               {Object.entries(ob.positions_after)
                 .sort(([a], [b]) => a.localeCompare(b))

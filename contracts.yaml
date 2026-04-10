@@ -1,0 +1,26 @@
+phase_duration_seconds: 120  # 30 min — same as run_markets.py
+
+contract:
+  id: sp500-hourly
+  name: "S&P 500 close price on 10th April 2026"
+  description: "What will the S&P 500 close at on 10th April 2026?"
+  search_terms:
+    - "S&P 500"
+    - "US stock market"
+    - "Wall Street"
+  price_ticker: "^GSPC"
+  multiplier: 0.01
+  position_limit: 100
+
+news:
+  sources:
+    - reuters.com
+    - cnbc.com
+    - bloomberg.com
+    - ft.com
+    - wsj.com
+    - bbc.com
+  max_headlines_per_cycle: 10
+
+settlement_date: "2026-04-10 16:00:00T-04:00"
+max_size: 50

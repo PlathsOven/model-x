@@ -1,8 +1,8 @@
 """ModelX debug dashboard — read-only FastAPI backend.
 
-Reads a SQLite db (produced by `run_demo.py --db ...` or `run_markets.py
---db ...`) and an optional reasoning-traces JSON file. Exposes endpoints
-that power the dashboard frontend. Never writes to either source.
+Reads a SQLite db (produced by `run_live.py --db ...`) and an optional
+reasoning-traces JSON file. Exposes endpoints that power the dashboard
+frontend. Never writes to either source.
 
 Multi-market support: when the db has rows in the `markets` table the
 dashboard exposes one MarketAppState per market and every per-market
@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-# Make the sibling `modelx` package importable. Mirrors run_demo.py's approach.
+# Make the sibling `modelx` package importable.
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
@@ -34,20 +34,20 @@ if _REPO_ROOT not in sys.path:
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from modelx.cycle import Cycle, load_cycle
+from modelx.phase import Phase, load_phase
 from modelx.db import (
     connect,
     get_contract,
     list_accounts,
     list_accounts_for_market,
-    list_cycle_states,
+    list_phase_states,
     list_fills_by_contract,
     list_markets,
-    positions_before_cycle,
+    positions_before_phase,
     positions_for_contract,
 )
 from modelx.matching import BookLevel, match_mm_phase
-from modelx.models import Account, Contract, CycleState, Fill, Market
+from modelx.models import Account, Contract, PhaseState, Fill, Market
 from modelx.scoring import (
     HFScores,
     MMScores,
@@ -80,12 +80,12 @@ class MarketAppState:
     market: Optional[Market] = None    # may be None for legacy demo dbs
     contract: Optional[Contract] = None
     accounts: List[Account] = field(default_factory=list)
-    cycle_states: List[CycleState] = field(default_factory=list)
-    cycles: List[Cycle] = field(default_factory=list)
+    phase_states: List[PhaseState] = field(default_factory=list)
+    phases: List[Phase] = field(default_factory=list)
     all_fills: List[Fill] = field(default_factory=list)
     positions: Dict[str, int] = field(default_factory=dict)
     marks: List[float] = field(default_factory=list)
-    residual_books: Dict[int, List[BookLevel]] = field(default_factory=dict)
+    residual_books: Dict[str, List[BookLevel]] = field(default_factory=dict)
 
 
 @dataclass
@@ -165,41 +165,42 @@ def _load_market(
     if contract is None:
         return None
 
-    # Prefer per-market accounts (live multi-market mode); fall back to
-    # the global accounts list (legacy single-contract demo).
+    # Prefer per-market accounts; fall back to the global accounts list
+    # for legacy databases without market_id on accounts.
     if market is not None:
         accounts = list_accounts_for_market(conn, market.id)
     else:
         accounts = list_accounts(conn)
 
-    cycle_states = list_cycle_states(conn, contract.id)
-    cycles: List[Cycle] = [
-        load_cycle(conn, contract, cs.id) for cs in cycle_states
+    phase_states = list_phase_states(conn, contract.id)
+    phases: List[Phase] = [
+        load_phase(conn, contract, ps.id) for ps in phase_states
     ]
 
     all_fills = list_fills_by_contract(conn, contract.id)
     positions = positions_for_contract(conn, contract.id)
-    marks = _carry_mark_forward(cycles) if cycles else []
+    marks = _carry_mark_forward(phases) if phases else []
 
-    # For every cycle, derive the residual book the HFs saw — always
-    # recompute, never trust load_cycle's conditional population.
-    residual_books: Dict[int, List[BookLevel]] = {}
-    for cs, cyc in zip(cycle_states, cycles):
-        entering = positions_before_cycle(conn, contract.id, cs.cycle_index)
-        _, book, _ = match_mm_phase(
-            cyc.quotes,
-            cycle_id=cs.id,
-            contract_id=contract.id,
-            positions=entering,
-        )
-        residual_books[cs.cycle_index] = book
+    # For every MM phase, derive the residual book the HFs saw — always
+    # recompute, never trust load_phase's conditional population.
+    residual_books: Dict[str, List[BookLevel]] = {}
+    for ps, phase in zip(phase_states, phases):
+        if ps.phase_type == "MM":
+            entering = positions_before_phase(conn, contract.id, ps.created_at)
+            _, book, _ = match_mm_phase(
+                phase.quotes,
+                cycle_id=ps.id,
+                contract_id=contract.id,
+                positions=entering,
+            )
+            residual_books[ps.id] = book
 
     return MarketAppState(
         market=market,
         contract=contract,
         accounts=accounts,
-        cycle_states=cycle_states,
-        cycles=cycles,
+        phase_states=phase_states,
+        phases=phases,
         all_fills=all_fills,
         positions=positions,
         marks=marks,
@@ -209,7 +210,7 @@ def _load_market(
 
 def _load_state(db_path: str, traces_path: str) -> AppState:
     """Open the db, load every market (or fall back to the first contract for
-    legacy demo dbs), rebuild cycles, load traces.
+    legacy demo dbs), rebuild phases, load traces.
 
     Never raises. On any failure (missing db, no contracts, malformed db,
     etc.) returns a sentinel AppState with `loaded=False` and a `status`
@@ -340,35 +341,36 @@ def _state() -> AppState:
 
 # ---------- serialization helpers ----------
 
-def _cycle_state_dict(cs: CycleState, info: Optional[str], mark: float, cyc: Cycle) -> dict:
-    mm_fills = sum(1 for f in cyc.fills if f.phase == "MM")
-    hf_fills = sum(1 for f in cyc.fills if f.phase == "HF")
+def _phase_state_dict(ps: PhaseState, info: Optional[str], mark: float, phase: Phase) -> dict:
+    mm_fills = sum(1 for f in phase.fills if f.phase == "MM")
+    hf_fills = sum(1 for f in phase.fills if f.phase == "HF")
     return {
-        "cycle_index": cs.cycle_index,
-        "cycle_id": cs.id,
-        "phase": cs.phase,
-        "mm_mark": cs.mm_mark,
-        "hf_mark": cs.hf_mark,
+        "phase_id": ps.id,
+        "phase_type": ps.phase_type,
+        "phase": ps.phase,
         "mark": mark if mark > 0 else None,
-        "num_quotes": len(cyc.quotes),
-        "num_orders": len(cyc.orders),
+        "timestamp": ps.created_at,
+        "closed_at": ps.closed_at,
+        "num_quotes": len(phase.quotes),
+        "num_orders": len(phase.orders),
         "mm_fills": mm_fills,
         "hf_fills": hf_fills,
         "info": info,
     }
 
 
-def _fill_dict(f: Fill, cycle_index_by_id: Dict[str, int]) -> dict:
+def _fill_dict(f: Fill, phase_ts_map: Dict[str, float]) -> dict:
+    timestamp = phase_ts_map.get(f.phase_id)
     return {
         "id": f.id,
-        "cycle_index": cycle_index_by_id.get(f.cycle_id, -1),
-        "cycle_id": f.cycle_id,
+        "phase_id": f.phase_id,
         "phase": f.phase,
         "buyer": f.buyer_account_id,
         "seller": f.seller_account_id,
         "price": f.price,
         "size": f.size,
         "is_self_cross": f.buyer_account_id == f.seller_account_id,
+        "timestamp": timestamp,
     }
 
 
@@ -381,26 +383,35 @@ def _book_level_dict(bl: BookLevel) -> dict:
     }
 
 
-def _info_by_cycle(state: AppState) -> Dict[int, str]:
-    """Extract {cycle_index: info_text} from traces (legacy demo source).
+def _info_by_phase(state: AppState, ms: MarketAppState) -> Dict[str, str]:
+    """Extract {phase_id: info_text} from DB phase_states or traces.
 
-    Live multi-market mode keeps info on the in-memory MarketRunner only —
-    not in the db or traces — so this returns {} for live markets and is
-    only useful for the legacy demo dashboard.
+    Primary source: per-phase info_text persisted in phase_states (works for
+    both live news and static info_schedule markets).
+    Fallback: episode_traces.json info_schedule (legacy demo compatibility).
     """
+    out: Dict[str, str] = {}
+    # Primary: DB-persisted info from phase_states.
+    for ps in ms.phase_states:
+        if ps.info_text:
+            out[ps.id] = ps.info_text
+    if out:
+        return out
+    # Fallback: traces file (legacy demo runs) — map by phase_id using index.
     if not state.traces:
         return {}
     raw = state.traces.get("info_schedule", {}) or {}
-    out: Dict[int, str] = {}
     for k, v in raw.items():
         try:
             idx = int(k)
         except (TypeError, ValueError):
             continue
-        if isinstance(v, list):
-            out[idx] = "\n".join(str(x) for x in v)
-        else:
-            out[idx] = str(v)
+        if idx < len(ms.phase_states):
+            ps = ms.phase_states[idx]
+            if isinstance(v, list):
+                out[ps.id] = "\n".join(str(x) for x in v)
+            else:
+                out[ps.id] = str(v)
     return out
 
 
@@ -409,8 +420,9 @@ def _info_by_cycle(state: AppState) -> Dict[int, str]:
 def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
     """Settlement-independent MM metrics, computed the same way scoring.py does
     but without the settlement-dependent fields."""
-    mm_accounts = {q.account_id for c in ms.cycles for q in c.quotes}
+    mm_accounts = {q.account_id for p in ms.phases for q in p.quotes}
     total_volume = sum(f.size for f in ms.all_fills)
+    mm_phases = [p for p in ms.phases if p.state.phase_type == "MM"]
     result: Dict[str, dict] = {}
     for acct in sorted(mm_accounts):
         volume = sum(
@@ -418,9 +430,9 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
             if f.buyer_account_id == acct or f.seller_account_id == acct
         )
         quoted = sum(
-            1 for c in ms.cycles if any(q.account_id == acct for q in c.quotes)
+            1 for p in mm_phases if any(q.account_id == acct for q in p.quotes)
         )
-        uptime = quoted / len(ms.cycles) if ms.cycles else 0.0
+        uptime = quoted / len(mm_phases) if mm_phases else 0.0
         total = 0
         with_other = 0
         for f in ms.all_fills:
@@ -436,8 +448,8 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
                 with_other += f.size
         consensus = 1.0 - (with_other / total) if total > 0 else 0.0
         avg_abs_pos = (
-            sum(abs(c.positions.get(acct, 0)) for c in ms.cycles) / len(ms.cycles)
-            if ms.cycles else 0.0
+            sum(abs(p.positions.get(acct, 0)) for p in ms.phases) / len(ms.phases)
+            if ms.phases else 0.0
         )
         self_count = sum(
             1 for f in ms.all_fills
@@ -456,9 +468,9 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
             "pnl_bps": None,
             "uptime": uptime,
             "consensus": consensus,
-            "markout_1": None,
-            "markout_5": None,
-            "markout_20": None,
+            "markout_2": None,
+            "markout_10": None,
+            "markout_40": None,
             "avg_abs_position": avg_abs_pos,
             "self_cross_count": self_count,
             "self_cross_volume": self_vol,
@@ -467,34 +479,55 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
 
 
 def _partial_hf_scores(ms: MarketAppState) -> Dict[str, dict]:
-    hf_accounts = {o.account_id for c in ms.cycles for o in c.orders}
+    hf_accounts = {o.account_id for p in ms.phases for o in p.orders}
     result: Dict[str, dict] = {}
     for acct in sorted(hf_accounts):
         result[acct] = {
             "account_id": acct,
             "total_pnl": None,
             "sharpe": None,
-            "markout_1": None,
-            "markout_5": None,
-            "markout_20": None,
+            "markout_2": None,
+            "markout_10": None,
+            "markout_40": None,
         }
     return result
 
 
 def _compute_scores_safe(ms: MarketAppState) -> dict:
     """Try the real scoring; on unsettled, fall back to partial metrics."""
+    latest_mark = ms.marks[-1] if ms.marks else 0.0
     if ms.contract is not None and ms.contract.settlement_value is not None:
         mm: Dict[str, MMScores] = score_mm(
-            ms.all_fills, ms.cycles, ms.positions, ms.contract,
+            ms.all_fills, ms.phases, ms.positions, ms.contract,
+            latest_mark=latest_mark,
         )
         hf: Dict[str, HFScores] = score_hf(
-            ms.all_fills, ms.cycles, ms.positions, ms.contract,
+            ms.all_fills, ms.phases, ms.positions, ms.contract,
+            latest_mark=latest_mark,
         )
         return {
             "settled": True,
             "mm": {k: v.__dict__ for k, v in mm.items()},
             "hf": {k: v.__dict__ for k, v in hf.items()},
         }
+    # Unsettled — still try the real scoring with latest_mark for PnL estimates.
+    if ms.phases and latest_mark > 0:
+        try:
+            mm_scores: Dict[str, MMScores] = score_mm(
+                ms.all_fills, ms.phases, ms.positions, ms.contract,
+                latest_mark=latest_mark,
+            )
+            hf_scores: Dict[str, HFScores] = score_hf(
+                ms.all_fills, ms.phases, ms.positions, ms.contract,
+                latest_mark=latest_mark,
+            )
+            return {
+                "settled": False,
+                "mm": {k: v.__dict__ for k, v in mm_scores.items()},
+                "hf": {k: v.__dict__ for k, v in hf_scores.items()},
+            }
+        except Exception:
+            pass  # fall through to partial
     return {
         "settled": False,
         "mm": _partial_mm_scores(ms),
@@ -505,16 +538,16 @@ def _compute_scores_safe(ms: MarketAppState) -> dict:
 # ---------- positions / pnl series ----------
 
 def _positions_series(ms: MarketAppState) -> Dict[str, List[dict]]:
-    """Walk all cycles once and record {pos, cash, pnl_mtm, pnl_realized} per
-    account per cycle. Mirrors scoring._cycle_pnl_series but tracks all
+    """Walk all phases once and record {pos, cash, pnl_mtm, pnl_realized} per
+    account per phase. Mirrors scoring._phase_pnl_series but tracks all
     accounts at once and keeps cash/position separately."""
     marks = ms.marks
     multiplier = ms.contract.multiplier
     settlement = ms.contract.settlement_value  # may be None
 
     all_accounts: set = set()
-    for c in ms.cycles:
-        for f in c.fills:
+    for p in ms.phases:
+        for f in p.fills:
             all_accounts.add(f.buyer_account_id)
             all_accounts.add(f.seller_account_id)
     # Include all known accounts (even ones who never traded) so the UI shows
@@ -526,8 +559,8 @@ def _positions_series(ms: MarketAppState) -> Dict[str, List[dict]]:
     pos: Dict[str, int] = {a: 0 for a in all_accounts}
     out: Dict[str, List[dict]] = {a: [] for a in all_accounts}
 
-    for i, cycle in enumerate(ms.cycles):
-        for f in cycle.fills:
+    for i, phase in enumerate(ms.phases):
+        for f in phase.fills:
             if f.buyer_account_id == f.seller_account_id:
                 # Self-fills: cash/position cancel, but still "executed"
                 continue
@@ -543,7 +576,9 @@ def _positions_series(ms: MarketAppState) -> Dict[str, List[dict]]:
                 if settlement is not None else None
             )
             out[a].append({
-                "cycle_index": cycle.state.cycle_index,
+                "phase_id": phase.state.id,
+                "timestamp": phase.state.created_at,
+                "phase_type": phase.state.phase_type,
                 "position": pos[a],
                 "cash": round(cash[a], 6),
                 "pnl_mtm": round(pnl_mtm, 6),
@@ -612,7 +647,7 @@ def episode(market_id: Optional[str] = Query(None)):
     if ms is None or ms.contract is None:
         return {
             "contract": None,
-            "num_cycles": 0,
+            "phase_count": 0,
             "settled": False,
             "accounts": [],
             "stats": {
@@ -667,8 +702,9 @@ def episode(market_id: Optional[str] = Query(None)):
     market_state = ms.market.state if ms.market is not None else (
         "SETTLED" if ms.contract.settlement_value is not None else "RUNNING"
     )
-    current_cycle = ms.market.current_cycle if ms.market is not None else len(ms.cycle_states)
-    num_cycles = ms.market.num_cycles if ms.market is not None else len(ms.cycle_states)
+    last_phase_ts = ms.market.last_phase_ts if ms.market is not None else (
+        ms.phase_states[-1].created_at if ms.phase_states else 0.0
+    )
 
     return {
         "contract": {
@@ -681,8 +717,8 @@ def episode(market_id: Optional[str] = Query(None)):
             "settlement_date": settlement_date,
         },
         "market_state": market_state,
-        "current_cycle": current_cycle,
-        "num_cycles": num_cycles,
+        "phase_count": len(ms.phase_states),
+        "last_phase_ts": last_phase_ts,
         "settled": ms.contract.settlement_value is not None,
         "accounts": accounts_payload,
         "stats": {
@@ -695,20 +731,20 @@ def episode(market_id: Optional[str] = Query(None)):
     }
 
 
-@app.get("/api/cycles")
-def cycles(market_id: Optional[str] = Query(None)):
+@app.get("/api/phases")
+def phases(market_id: Optional[str] = Query(None)):
     state = _state()
     ms = _select_market(state, market_id)
     if ms is None:
         return []
-    info_by_cycle = _info_by_cycle(state)
+    info_map = _info_by_phase(state, ms)
     out = []
-    for i, (cs, cyc) in enumerate(zip(ms.cycle_states, ms.cycles)):
-        out.append(_cycle_state_dict(
-            cs,
-            info=info_by_cycle.get(cs.cycle_index),
+    for i, (ps, phase) in enumerate(zip(ms.phase_states, ms.phases)):
+        out.append(_phase_state_dict(
+            ps,
+            info=info_map.get(ps.id),
             mark=ms.marks[i],
-            cyc=cyc,
+            phase=phase,
         ))
     return out
 
@@ -717,33 +753,28 @@ def cycles(market_id: Optional[str] = Query(None)):
 def fills(
     agent: Optional[str] = None,
     phase: Optional[str] = None,
-    cycle_min: Optional[int] = None,
-    cycle_max: Optional[int] = None,
     market_id: Optional[str] = Query(None),
 ):
     state = _state()
     ms = _select_market(state, market_id)
     if ms is None:
         return []
-    cycle_index_by_id = {cs.id: cs.cycle_index for cs in ms.cycle_states}
+    phase_ts_map: Dict[str, float] = {
+        ps.id: ps.created_at for ps in ms.phase_states
+    }
     out = []
     for f in ms.all_fills:
-        ci = cycle_index_by_id.get(f.cycle_id, -1)
         if phase and f.phase != phase:
             continue
         if agent and agent not in (f.buyer_account_id, f.seller_account_id):
             continue
-        if cycle_min is not None and ci < cycle_min:
-            continue
-        if cycle_max is not None and ci > cycle_max:
-            continue
-        out.append(_fill_dict(f, cycle_index_by_id))
+        out.append(_fill_dict(f, phase_ts_map))
     return out
 
 
 @app.get("/api/quotes")
 def quotes(
-    cycle_index: Optional[int] = None,
+    phase_id: Optional[str] = None,
     market_id: Optional[str] = Query(None),
 ):
     state = _state()
@@ -751,13 +782,14 @@ def quotes(
     if ms is None:
         return []
     out = []
-    for cs, cyc in zip(ms.cycle_states, ms.cycles):
-        if cycle_index is not None and cs.cycle_index != cycle_index:
+    for ps, ph in zip(ms.phase_states, ms.phases):
+        if phase_id is not None and ps.id != phase_id:
             continue
-        for q in cyc.quotes:
+        for q in ph.quotes:
             out.append({
-                "cycle_index": cs.cycle_index,
-                "cycle_id": cs.id,
+                "phase_id": ps.id,
+                "phase_type": ps.phase_type,
+                "timestamp": ps.created_at,
                 "account_id": q.account_id,
                 "bid_price": q.bid_price,
                 "bid_size": q.bid_size,
@@ -769,7 +801,7 @@ def quotes(
 
 @app.get("/api/orders")
 def orders(
-    cycle_index: Optional[int] = None,
+    phase_id: Optional[str] = None,
     market_id: Optional[str] = Query(None),
 ):
     state = _state()
@@ -777,13 +809,14 @@ def orders(
     if ms is None:
         return []
     out = []
-    for cs, cyc in zip(ms.cycle_states, ms.cycles):
-        if cycle_index is not None and cs.cycle_index != cycle_index:
+    for ps, ph in zip(ms.phase_states, ms.phases):
+        if phase_id is not None and ps.id != phase_id:
             continue
-        for o in cyc.orders:
+        for o in ph.orders:
             out.append({
-                "cycle_index": cs.cycle_index,
-                "cycle_id": cs.id,
+                "phase_id": ps.id,
+                "phase_type": ps.phase_type,
+                "timestamp": ps.created_at,
                 "account_id": o.account_id,
                 "side": o.side,
                 "size": o.size,
@@ -791,24 +824,31 @@ def orders(
     return out
 
 
-@app.get("/api/orderbook/{cycle_index}")
-def orderbook(cycle_index: int, market_id: Optional[str] = Query(None)):
+@app.get("/api/orderbook/{phase_id:path}")
+def orderbook(phase_id: str, market_id: Optional[str] = Query(None)):
     state = _state()
     ms = _select_market(state, market_id)
     if ms is None:
         raise HTTPException(
-            status_code=404, detail=f"no cycles loaded yet (status={state.status})"
+            status_code=404, detail=f"no phases loaded yet (status={state.status})"
         )
-    if cycle_index < 0 or cycle_index >= len(ms.cycle_states):
-        raise HTTPException(status_code=404, detail=f"no cycle with index {cycle_index}")
 
-    cs = ms.cycle_states[cycle_index]
-    cyc = ms.cycles[cycle_index]
-    book = ms.residual_books.get(cycle_index, [])
+    # Find the phase by id.
+    target_idx: Optional[int] = None
+    for i, ps in enumerate(ms.phase_states):
+        if ps.id == phase_id:
+            target_idx = i
+            break
+    if target_idx is None:
+        raise HTTPException(status_code=404, detail=f"no phase with id {phase_id!r}")
 
-    positions_after = dict(cyc.positions)
+    ps = ms.phase_states[target_idx]
+    phase = ms.phases[target_idx]
+    book = ms.residual_books.get(ps.id, [])
+
+    positions_after = dict(phase.positions)
     positions_before = dict(positions_after)
-    for f in cyc.fills:
+    for f in phase.fills:
         positions_before[f.buyer_account_id] = (
             positions_before.get(f.buyer_account_id, 0) - f.size
         )
@@ -816,14 +856,16 @@ def orderbook(cycle_index: int, market_id: Optional[str] = Query(None)):
             positions_before.get(f.seller_account_id, 0) + f.size
         )
 
-    cycle_index_by_id = {c.id: c.cycle_index for c in ms.cycle_states}
+    phase_ts_map: Dict[str, float] = {
+        p.id: p.created_at for p in ms.phase_states
+    }
 
     return {
-        "cycle_index": cs.cycle_index,
-        "cycle_id": cs.id,
-        "phase": cs.phase,
-        "mm_mark": cs.mm_mark,
-        "hf_mark": cs.hf_mark,
+        "phase_id": ps.id,
+        "phase_type": ps.phase_type,
+        "phase": ps.phase,
+        "mark": ps.mark,
+        "timestamp": ps.created_at,
         "quotes": [
             {
                 "account_id": q.account_id,
@@ -832,18 +874,18 @@ def orderbook(cycle_index: int, market_id: Optional[str] = Query(None)):
                 "ask_price": q.ask_price,
                 "ask_size": q.ask_size,
             }
-            for q in cyc.quotes
+            for q in phase.quotes
         ],
         "mm_fills": [
-            _fill_dict(f, cycle_index_by_id) for f in cyc.fills if f.phase == "MM"
+            _fill_dict(f, phase_ts_map) for f in phase.fills if f.phase == "MM"
         ],
         "residual_book": [_book_level_dict(bl) for bl in book],
         "orders": [
             {"account_id": o.account_id, "side": o.side, "size": o.size}
-            for o in cyc.orders
+            for o in phase.orders
         ],
         "hf_fills": [
-            _fill_dict(f, cycle_index_by_id) for f in cyc.fills if f.phase == "HF"
+            _fill_dict(f, phase_ts_map) for f in phase.fills if f.phase == "HF"
         ],
         "positions_before": positions_before,
         "positions_after": positions_after,
@@ -879,7 +921,7 @@ def traces_for_agent(agent_id: str):
 def metrics(market_id: Optional[str] = Query(None)):
     state = _state()
     ms = _select_market(state, market_id)
-    if ms is None or ms.contract is None or not ms.cycles:
+    if ms is None or ms.contract is None or not ms.phases:
         return {"settled": False, "mm": {}, "hf": {}}
     return _compute_scores_safe(ms)
 
@@ -900,21 +942,23 @@ def timeseries(market_id: Optional[str] = Query(None)):
     ms = _select_market(state, market_id)
     if ms is None or ms.contract is None:
         return {
-            "cycles": [],
+            "phases": [],
             "fills": [],
             "settlement": None,
-            "info_cycles": [],
-            "info_by_cycle": {},
+            "info_phases": [],
+            "info_by_phase": {},
             "mm_accounts": [],
             "hf_accounts": [],
         }
-    info_by_cycle = _info_by_cycle(state)
-    cycle_index_by_id = {cs.id: cs.cycle_index for cs in ms.cycle_states}
+    info_map = _info_by_phase(state, ms)
+    phase_ts_map: Dict[str, float] = {
+        ps.id: ps.created_at for ps in ms.phase_states
+    }
 
     rows = []
-    for i, (cs, cyc) in enumerate(zip(ms.cycle_states, ms.cycles)):
+    for i, (ps, phase) in enumerate(zip(ms.phase_states, ms.phases)):
         quotes_by_agent: Dict[str, dict] = {}
-        for q in cyc.quotes:
+        for q in phase.quotes:
             quotes_by_agent[q.account_id] = {
                 "bid_price": q.bid_price,
                 "bid_size": q.bid_size,
@@ -924,20 +968,22 @@ def timeseries(market_id: Optional[str] = Query(None)):
             }
 
         rows.append({
-            "cycle_index": cs.cycle_index,
-            "phase": cs.phase,
-            "mm_mark": cs.mm_mark,
-            "hf_mark": cs.hf_mark,
+            "phase_id": ps.id,
+            "phase_type": ps.phase_type,
+            "phase": ps.phase,
             "mark": ms.marks[i] if ms.marks[i] > 0 else None,
+            "timestamp": ps.created_at,
+            "closed_at": ps.closed_at,
             "quotes_by_agent": quotes_by_agent,
-            "info": info_by_cycle.get(cs.cycle_index),
+            "info": info_map.get(ps.id),
         })
 
     fills_payload = []
     for f in ms.all_fills:
-        ci = cycle_index_by_id.get(f.cycle_id, -1)
+        timestamp = phase_ts_map.get(f.phase_id)
         fills_payload.append({
-            "cycle_index": ci,
+            "phase_id": f.phase_id,
+            "timestamp": timestamp,
             "price": f.price,
             "size": f.size,
             "phase": f.phase,
@@ -946,16 +992,16 @@ def timeseries(market_id: Optional[str] = Query(None)):
             "is_self_cross": f.buyer_account_id == f.seller_account_id,
         })
 
-    info_cycles = sorted(info_by_cycle.keys())
+    info_phases = sorted(info_map.keys())
 
     return {
-        "cycles": rows,
+        "phases": rows,
         "fills": fills_payload,
         "settlement": ms.contract.settlement_value,
-        "info_cycles": info_cycles,
-        "info_by_cycle": info_by_cycle,
-        "mm_accounts": sorted({q.account_id for c in ms.cycles for q in c.quotes}),
-        "hf_accounts": sorted({o.account_id for c in ms.cycles for o in c.orders}),
+        "info_phases": info_phases,
+        "info_by_phase": info_map,
+        "mm_accounts": sorted({q.account_id for p in ms.phases for q in p.quotes}),
+        "hf_accounts": sorted({o.account_id for p in ms.phases for o in p.orders}),
     }
 
 
@@ -975,8 +1021,8 @@ def markets():
                 "name": m.name,
                 "description": m.description,
                 "state": m.state,
-                "current_cycle": m.current_cycle,
-                "num_cycles": m.num_cycles,
+                "phase_count": len(ms.phase_states),
+                "last_phase_ts": m.last_phase_ts,
                 "settlement_date": m.settlement_date,
                 "settlement_value": ms.contract.settlement_value,
                 "multiplier": m.multiplier,
@@ -990,8 +1036,10 @@ def markets():
                 "name": ms.contract.name,
                 "description": ms.contract.description,
                 "state": "SETTLED" if settled else "RUNNING",
-                "current_cycle": len(ms.cycle_states),
-                "num_cycles": len(ms.cycle_states),
+                "phase_count": len(ms.phase_states),
+                "last_phase_ts": (
+                    ms.phase_states[-1].created_at if ms.phase_states else 0.0
+                ),
                 "settlement_date": None,
                 "settlement_value": ms.contract.settlement_value,
                 "multiplier": ms.contract.multiplier,

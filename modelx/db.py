@@ -16,11 +16,11 @@ from typing import Dict, List, Optional
 from .models import (
     Account,
     Contract,
-    CycleState,
     Fill,
     LifetimeStat,
     Market,
     Order,
+    PhaseState,
     Quote,
 )
 
@@ -46,22 +46,20 @@ CREATE TABLE IF NOT EXISTS contracts (
     settled_at       REAL
 );
 
-CREATE TABLE IF NOT EXISTS cycle_states (
+CREATE TABLE IF NOT EXISTS phase_states (
     id                 TEXT PRIMARY KEY,
     contract_id        TEXT NOT NULL,
-    cycle_index        INTEGER NOT NULL,
+    phase_type         TEXT NOT NULL,
     phase              TEXT NOT NULL,
-    mm_mark            REAL,
-    hf_mark            REAL,
+    mark               REAL,
     created_at         REAL NOT NULL DEFAULT 0,
-    mm_phase_ended_at  REAL,
-    hf_phase_ended_at  REAL,
-    UNIQUE (contract_id, cycle_index)
+    closed_at          REAL,
+    info_text          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS quotes (
     id           TEXT PRIMARY KEY,
-    cycle_id     TEXT NOT NULL,
+    phase_id     TEXT NOT NULL,
     contract_id  TEXT NOT NULL,
     account_id   TEXT NOT NULL,
     bid_price    REAL NOT NULL,
@@ -69,23 +67,23 @@ CREATE TABLE IF NOT EXISTS quotes (
     ask_price    REAL NOT NULL,
     ask_size     INTEGER NOT NULL,
     created_at   REAL NOT NULL DEFAULT 0,
-    UNIQUE (cycle_id, account_id)
+    UNIQUE (phase_id, account_id)
 );
 
 CREATE TABLE IF NOT EXISTS orders (
     id           TEXT PRIMARY KEY,
-    cycle_id     TEXT NOT NULL,
+    phase_id     TEXT NOT NULL,
     contract_id  TEXT NOT NULL,
     account_id   TEXT NOT NULL,
     side         TEXT NOT NULL,
     size         INTEGER NOT NULL,
     created_at   REAL NOT NULL DEFAULT 0,
-    UNIQUE (cycle_id, account_id)
+    UNIQUE (phase_id, account_id)
 );
 
 CREATE TABLE IF NOT EXISTS fills (
     id                 TEXT PRIMARY KEY,
-    cycle_id           TEXT NOT NULL,
+    phase_id           TEXT NOT NULL,
     contract_id        TEXT NOT NULL,
     buyer_account_id   TEXT NOT NULL,
     seller_account_id  TEXT NOT NULL,
@@ -101,12 +99,11 @@ CREATE TABLE IF NOT EXISTS markets (
     description       TEXT NOT NULL,
     multiplier        REAL NOT NULL DEFAULT 1.0,
     position_limit    INTEGER NOT NULL DEFAULT 100,
-    num_cycles        INTEGER NOT NULL DEFAULT 20,
     max_size          INTEGER NOT NULL DEFAULT 50,
     settlement_date   TEXT,
     state             TEXT NOT NULL DEFAULT 'RUNNING',
-    current_cycle     INTEGER NOT NULL DEFAULT 0,
     pending_mm        INTEGER NOT NULL DEFAULT 1,
+    last_phase_ts     REAL NOT NULL DEFAULT 0,
     created_at        REAL NOT NULL DEFAULT 0
 );
 
@@ -121,11 +118,11 @@ CREATE TABLE IF NOT EXISTS agent_lifetime_stats (
     PRIMARY KEY (account_id, market_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_quotes_cycle  ON quotes  (cycle_id);
-CREATE INDEX IF NOT EXISTS idx_orders_cycle  ON orders  (cycle_id);
-CREATE INDEX IF NOT EXISTS idx_fills_cycle   ON fills   (cycle_id);
-CREATE INDEX IF NOT EXISTS idx_fills_contract ON fills  (contract_id);
-CREATE INDEX IF NOT EXISTS idx_cycles_contract ON cycle_states (contract_id);
+CREATE INDEX IF NOT EXISTS idx_quotes_phase   ON quotes  (phase_id);
+CREATE INDEX IF NOT EXISTS idx_orders_phase   ON orders  (phase_id);
+CREATE INDEX IF NOT EXISTS idx_fills_phase    ON fills   (phase_id);
+CREATE INDEX IF NOT EXISTS idx_fills_contract ON fills   (contract_id);
+CREATE INDEX IF NOT EXISTS idx_phases_contract ON phase_states (contract_id);
 """
 
 # Indexes that depend on migrated columns. Created after _maybe_migrate so
@@ -140,11 +137,15 @@ def connect(path: str) -> sqlite3.Connection:
 
     `path` can be a filesystem path or `":memory:"` for an ephemeral db.
     Old databases (pre-multi-market) are silently migrated forward.
+
+    Migration runs BEFORE the new schema so that old cycle-based tables
+    are renamed/rebuilt before CREATE TABLE IF NOT EXISTS sees them.
     """
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
+    # Migrate old tables FIRST, before applying the new schema.
     _maybe_migrate(conn)
+    conn.executescript(SCHEMA)
     conn.executescript(POST_MIGRATION_SCHEMA)
     conn.commit()
     return conn
@@ -153,10 +154,10 @@ def connect(path: str) -> sqlite3.Connection:
 def _maybe_migrate(conn: sqlite3.Connection) -> None:
     """Idempotent migrations for older databases.
 
-    The new `accounts.market_id` column is created via `CREATE TABLE IF NOT
-    EXISTS` for fresh databases, but existing tables need an explicit
-    `ALTER TABLE`. SQLite raises if the column already exists, which is the
-    desired no-op behavior.
+    Handles:
+    - Legacy accounts without market_id column
+    - Legacy cycle_states -> phase_states migration
+    - Legacy markets table without new columns
     """
     try:
         conn.execute(
@@ -164,6 +165,178 @@ def _maybe_migrate(conn: sqlite3.Connection) -> None:
         )
     except sqlite3.OperationalError:
         pass  # column already exists
+
+    # Migrate old cycle-based schema to phase-based schema.
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+
+    # Detect if child tables still use the old cycle_id column.
+    has_old_fills = False
+    if "fills" in tables:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(fills)").fetchall()}
+        has_old_fills = "cycle_id" in cols
+
+    if "cycle_states" in tables or has_old_fills:
+        _migrate_cycles_to_phases(conn)
+
+
+def _migrate_cycles_to_phases(conn: sqlite3.Connection) -> None:
+    """One-time migration from cycle-based to phase-based schema.
+
+    Renames cycle_id -> phase_id in child tables, splits each cycle_state
+    into two phase_states (MM and HF), and migrates the markets table.
+    """
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+
+    # Step 1: Rename cycle_id -> phase_id in child tables by recreating them.
+    # Only do this if the tables still have the old cycle_id column.
+    def _has_column(table: str, col: str) -> bool:
+        if table not in tables:
+            return False
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        return col in cols
+
+    if _has_column("fills", "cycle_id"):
+        conn.executescript("""
+            ALTER TABLE fills RENAME TO _old_fills;
+            CREATE TABLE fills (
+                id TEXT PRIMARY KEY, phase_id TEXT NOT NULL, contract_id TEXT NOT NULL,
+                buyer_account_id TEXT NOT NULL, seller_account_id TEXT NOT NULL,
+                price REAL NOT NULL, size INTEGER NOT NULL, phase TEXT NOT NULL,
+                created_at REAL NOT NULL DEFAULT 0
+            );
+            INSERT INTO fills (id, phase_id, contract_id, buyer_account_id,
+                seller_account_id, price, size, phase, created_at)
+            SELECT id, cycle_id, contract_id, buyer_account_id,
+                seller_account_id, price, size, phase, created_at FROM _old_fills;
+            DROP TABLE _old_fills;
+        """)
+
+    if _has_column("quotes", "cycle_id"):
+        conn.executescript("""
+            ALTER TABLE quotes RENAME TO _old_quotes;
+            CREATE TABLE quotes (
+                id TEXT PRIMARY KEY, phase_id TEXT NOT NULL, contract_id TEXT NOT NULL,
+                account_id TEXT NOT NULL, bid_price REAL NOT NULL, bid_size INTEGER NOT NULL,
+                ask_price REAL NOT NULL, ask_size INTEGER NOT NULL,
+                created_at REAL NOT NULL DEFAULT 0, UNIQUE (phase_id, account_id)
+            );
+            INSERT INTO quotes (id, phase_id, contract_id, account_id,
+                bid_price, bid_size, ask_price, ask_size, created_at)
+            SELECT id, cycle_id, contract_id, account_id,
+                bid_price, bid_size, ask_price, ask_size, created_at FROM _old_quotes;
+            DROP TABLE _old_quotes;
+        """)
+
+    if _has_column("orders", "cycle_id"):
+        conn.executescript("""
+            ALTER TABLE orders RENAME TO _old_orders;
+            CREATE TABLE orders (
+                id TEXT PRIMARY KEY, phase_id TEXT NOT NULL, contract_id TEXT NOT NULL,
+                account_id TEXT NOT NULL, side TEXT NOT NULL, size INTEGER NOT NULL,
+                created_at REAL NOT NULL DEFAULT 0, UNIQUE (phase_id, account_id)
+            );
+            INSERT INTO orders (id, phase_id, contract_id, account_id, side, size, created_at)
+            SELECT id, cycle_id, contract_id, account_id, side, size, created_at FROM _old_orders;
+            DROP TABLE _old_orders;
+        """)
+
+    # Step 2: Create phase_states from cycle_states (if cycle_states exists).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS phase_states (
+            id TEXT PRIMARY KEY, contract_id TEXT NOT NULL,
+            phase_type TEXT NOT NULL, phase TEXT NOT NULL,
+            mark REAL, created_at REAL NOT NULL DEFAULT 0,
+            closed_at REAL, info_text TEXT
+        )
+    """)
+
+    # Re-check tables since the child table rebuilds above may have changed things.
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    if "cycle_states" not in tables:
+        conn.commit()
+        return
+
+    # Each old cycle becomes an MM + HF phase pair. Use the cycle_index
+    # to generate synthetic unique timestamps since legacy data may have
+    # created_at = 0.0 for all rows.  Base = max(created_at, 1_000_000)
+    # so we don't collide with epoch 0, then add 2*cycle_index for MM and
+    # 2*cycle_index+1 for HF.
+    old_rows = conn.execute(
+        "SELECT * FROM cycle_states ORDER BY cycle_index"
+    ).fetchall()
+    for row in old_rows:
+        r = dict(row)
+        old_id = r["id"]
+        contract_id = r["contract_id"]
+        cycle_index = r["cycle_index"]
+        created_at = r["created_at"] or 0.0
+
+        # Synthetic timestamps: base + 2*idx for MM, base + 2*idx + 1 for HF.
+        base_ts = max(created_at, 1_000_000)
+        mm_ts = int(base_ts) + 2 * cycle_index
+        hf_ts = mm_ts + 1
+
+        mm_id = f"{contract_id}:{mm_ts}"
+        mm_closed_at = r.get("mm_phase_ended_at")
+        conn.execute(
+            "INSERT OR IGNORE INTO phase_states "
+            "(id, contract_id, phase_type, phase, mark, created_at, closed_at, info_text) "
+            "VALUES (?, ?, 'MM', 'CLOSED', ?, ?, ?, ?)",
+            (mm_id, contract_id, r.get("mm_mark"), float(mm_ts), mm_closed_at,
+             r.get("info_text")),
+        )
+
+        hf_id = f"{contract_id}:{hf_ts}"
+        hf_closed_at = r.get("hf_phase_ended_at")
+        hf_phase = "CLOSED" if hf_closed_at else "OPEN"
+        conn.execute(
+            "INSERT OR IGNORE INTO phase_states "
+            "(id, contract_id, phase_type, phase, mark, created_at, closed_at, info_text) "
+            "VALUES (?, ?, 'HF', ?, ?, ?, ?, NULL)",
+            (hf_id, contract_id, hf_phase, r.get("hf_mark"), float(hf_ts), hf_closed_at),
+        )
+
+        # Remap phase_id references from old cycle_id to new phase IDs.
+        conn.execute(
+            "UPDATE fills SET phase_id = ? WHERE phase_id = ? AND phase = 'MM'",
+            (mm_id, old_id),
+        )
+        conn.execute(
+            "UPDATE fills SET phase_id = ? WHERE phase_id = ? AND phase = 'HF'",
+            (hf_id, old_id),
+        )
+        conn.execute("UPDATE quotes SET phase_id = ? WHERE phase_id = ?", (mm_id, old_id))
+        conn.execute("UPDATE orders SET phase_id = ? WHERE phase_id = ?", (hf_id, old_id))
+
+    conn.execute("DROP TABLE IF EXISTS cycle_states")
+
+    # Step 3: Migrate markets table.
+    try:
+        conn.execute("ALTER TABLE markets ADD COLUMN last_phase_ts REAL NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+
+    # Recreate indexes for renamed columns.
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_quotes_phase ON quotes (phase_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_phase ON orders (phase_id);
+        CREATE INDEX IF NOT EXISTS idx_fills_phase ON fills (phase_id);
+        CREATE INDEX IF NOT EXISTS idx_phases_contract ON phase_states (contract_id);
+    """)
+
+    conn.commit()
 
 
 # ---------- accounts ----------
@@ -237,44 +410,43 @@ def get_contract(conn: sqlite3.Connection, contract_id: str) -> Optional[Contrac
     return Contract(**dict(row)) if row else None
 
 
-# ---------- cycle_states ----------
+# ---------- phase_states ----------
 
-def upsert_cycle_state(conn: sqlite3.Connection, state: CycleState) -> None:
+def upsert_phase_state(conn: sqlite3.Connection, state: PhaseState) -> None:
     conn.execute(
         """
-        INSERT INTO cycle_states (
-            id, contract_id, cycle_index, phase, mm_mark, hf_mark,
-            created_at, mm_phase_ended_at, hf_phase_ended_at
+        INSERT INTO phase_states (
+            id, contract_id, phase_type, phase, mark,
+            created_at, closed_at, info_text
         ) VALUES (
-            :id, :contract_id, :cycle_index, :phase, :mm_mark, :hf_mark,
-            :created_at, :mm_phase_ended_at, :hf_phase_ended_at
+            :id, :contract_id, :phase_type, :phase, :mark,
+            :created_at, :closed_at, :info_text
         )
         ON CONFLICT(id) DO UPDATE SET
-            phase             = excluded.phase,
-            mm_mark           = excluded.mm_mark,
-            hf_mark           = excluded.hf_mark,
-            mm_phase_ended_at = excluded.mm_phase_ended_at,
-            hf_phase_ended_at = excluded.hf_phase_ended_at
+            phase      = excluded.phase,
+            mark       = excluded.mark,
+            closed_at  = excluded.closed_at,
+            info_text  = excluded.info_text
         """,
         state.__dict__,
     )
     conn.commit()
 
 
-def get_cycle_state(conn: sqlite3.Connection, cycle_id: str) -> Optional[CycleState]:
-    row = conn.execute("SELECT * FROM cycle_states WHERE id = ?", (cycle_id,)).fetchone()
-    return CycleState(**dict(row)) if row else None
+def get_phase_state(conn: sqlite3.Connection, phase_id: str) -> Optional[PhaseState]:
+    row = conn.execute("SELECT * FROM phase_states WHERE id = ?", (phase_id,)).fetchone()
+    return PhaseState(**dict(row)) if row else None
 
 
-def list_cycle_states(
+def list_phase_states(
     conn: sqlite3.Connection,
     contract_id: str,
-) -> List[CycleState]:
+) -> List[PhaseState]:
     rows = conn.execute(
-        "SELECT * FROM cycle_states WHERE contract_id = ? ORDER BY cycle_index",
+        "SELECT * FROM phase_states WHERE contract_id = ? ORDER BY created_at",
         (contract_id,),
     ).fetchall()
-    return [CycleState(**dict(r)) for r in rows]
+    return [PhaseState(**dict(r)) for r in rows]
 
 
 # ---------- quotes ----------
@@ -283,10 +455,10 @@ def insert_quote(conn: sqlite3.Connection, quote: Quote) -> None:
     conn.execute(
         """
         INSERT INTO quotes (
-            id, cycle_id, contract_id, account_id,
+            id, phase_id, contract_id, account_id,
             bid_price, bid_size, ask_price, ask_size, created_at
         ) VALUES (
-            :id, :cycle_id, :contract_id, :account_id,
+            :id, :phase_id, :contract_id, :account_id,
             :bid_price, :bid_size, :ask_price, :ask_size, :created_at
         )
         """,
@@ -295,13 +467,13 @@ def insert_quote(conn: sqlite3.Connection, quote: Quote) -> None:
     conn.commit()
 
 
-def list_quotes_by_cycle(
+def list_quotes_by_phase(
     conn: sqlite3.Connection,
-    cycle_id: str,
+    phase_id: str,
 ) -> List[Quote]:
     rows = conn.execute(
-        "SELECT * FROM quotes WHERE cycle_id = ? ORDER BY id",
-        (cycle_id,),
+        "SELECT * FROM quotes WHERE phase_id = ? ORDER BY id",
+        (phase_id,),
     ).fetchall()
     return [Quote(**dict(r)) for r in rows]
 
@@ -312,9 +484,9 @@ def insert_order(conn: sqlite3.Connection, order: Order) -> None:
     conn.execute(
         """
         INSERT INTO orders (
-            id, cycle_id, contract_id, account_id, side, size, created_at
+            id, phase_id, contract_id, account_id, side, size, created_at
         ) VALUES (
-            :id, :cycle_id, :contract_id, :account_id, :side, :size, :created_at
+            :id, :phase_id, :contract_id, :account_id, :side, :size, :created_at
         )
         """,
         order.__dict__,
@@ -322,29 +494,74 @@ def insert_order(conn: sqlite3.Connection, order: Order) -> None:
     conn.commit()
 
 
-def list_orders_by_cycle(
+def list_orders_by_phase(
     conn: sqlite3.Connection,
-    cycle_id: str,
+    phase_id: str,
 ) -> List[Order]:
     rows = conn.execute(
-        "SELECT * FROM orders WHERE cycle_id = ? ORDER BY id",
-        (cycle_id,),
+        "SELECT * FROM orders WHERE phase_id = ? ORDER BY id",
+        (phase_id,),
     ).fetchall()
     return [Order(**dict(r)) for r in rows]
 
 
 # ---------- fills ----------
 
-def delete_cycle_data(conn: sqlite3.Connection, cycle_id: str) -> None:
-    """Remove all fills, orders, and quotes for a cycle_id.
+def delete_phase_data(conn: sqlite3.Connection, phase_id: str) -> None:
+    """Remove all fills, orders, and quotes for a phase_id.
 
-    Called by open_cycle to clean up stale data from a previously interrupted
-    run that left orphaned rows (e.g. market row was reset but child tables
-    were not).
+    Called by open_phase to clean up stale data from a previously interrupted
+    run that left orphaned rows.
     """
-    conn.execute("DELETE FROM fills WHERE cycle_id = ?", (cycle_id,))
-    conn.execute("DELETE FROM orders WHERE cycle_id = ?", (cycle_id,))
-    conn.execute("DELETE FROM quotes WHERE cycle_id = ?", (cycle_id,))
+    conn.execute("DELETE FROM fills WHERE phase_id = ?", (phase_id,))
+    conn.execute("DELETE FROM orders WHERE phase_id = ?", (phase_id,))
+    conn.execute("DELETE FROM quotes WHERE phase_id = ?", (phase_id,))
+    conn.commit()
+
+
+def delete_future_data(conn: sqlite3.Connection, market_id: str, cutoff: float) -> int:
+    """Remove data with timestamps after `cutoff` (epoch seconds).
+
+    Used on restart to trim incomplete/future phases while preserving
+    historical data so time series continues across runs.
+    Returns total number of deleted rows.
+    """
+    future_ids = [
+        row[0] for row in conn.execute(
+            "SELECT id FROM phase_states WHERE contract_id = ? AND created_at > ?",
+            (market_id, cutoff),
+        ).fetchall()
+    ]
+    total = 0
+    for pid in future_ids:
+        total += conn.execute("DELETE FROM fills WHERE phase_id = ?", (pid,)).rowcount
+        total += conn.execute("DELETE FROM orders WHERE phase_id = ?", (pid,)).rowcount
+        total += conn.execute("DELETE FROM quotes WHERE phase_id = ?", (pid,)).rowcount
+    if future_ids:
+        placeholders = ",".join("?" for _ in future_ids)
+        total += conn.execute(
+            f"DELETE FROM phase_states WHERE id IN ({placeholders})", future_ids,
+        ).rowcount
+    conn.commit()
+    return total
+
+
+def delete_market_data(conn: sqlite3.Connection, market_id: str) -> None:
+    """Remove ALL data associated with a market so it can be re-run fresh.
+
+    Deletes child rows first (fills, orders, quotes, cycle_states, accounts,
+    lifetime stats) then the market and contract rows themselves.
+    """
+    conn.execute("DELETE FROM fills WHERE contract_id = ?", (market_id,))
+    conn.execute("DELETE FROM orders WHERE contract_id = ?", (market_id,))
+    conn.execute("DELETE FROM quotes WHERE contract_id = ?", (market_id,))
+    conn.execute("DELETE FROM phase_states WHERE contract_id = ?", (market_id,))
+    conn.execute("DELETE FROM accounts WHERE market_id = ?", (market_id,))
+    conn.execute(
+        "DELETE FROM agent_lifetime_stats WHERE market_id = ?", (market_id,)
+    )
+    conn.execute("DELETE FROM markets WHERE id = ?", (market_id,))
+    conn.execute("DELETE FROM contracts WHERE id = ?", (market_id,))
     conn.commit()
 
 
@@ -352,10 +569,10 @@ def insert_fill(conn: sqlite3.Connection, fill: Fill) -> None:
     conn.execute(
         """
         INSERT INTO fills (
-            id, cycle_id, contract_id, buyer_account_id, seller_account_id,
+            id, phase_id, contract_id, buyer_account_id, seller_account_id,
             price, size, phase, created_at
         ) VALUES (
-            :id, :cycle_id, :contract_id, :buyer_account_id, :seller_account_id,
+            :id, :phase_id, :contract_id, :buyer_account_id, :seller_account_id,
             :price, :size, :phase, :created_at
         )
         """,
@@ -364,13 +581,13 @@ def insert_fill(conn: sqlite3.Connection, fill: Fill) -> None:
     conn.commit()
 
 
-def list_fills_by_cycle(
+def list_fills_by_phase(
     conn: sqlite3.Connection,
-    cycle_id: str,
+    phase_id: str,
 ) -> List[Fill]:
     rows = conn.execute(
-        "SELECT * FROM fills WHERE cycle_id = ? ORDER BY id",
-        (cycle_id,),
+        "SELECT * FROM fills WHERE phase_id = ? ORDER BY id",
+        (phase_id,),
     ).fetchall()
     return [Fill(**dict(r)) for r in rows]
 
@@ -383,9 +600,9 @@ def list_fills_by_contract(
         """
         SELECT f.*
         FROM fills f
-        JOIN cycle_states c ON f.cycle_id = c.id
+        JOIN phase_states p ON f.phase_id = p.id
         WHERE f.contract_id = ?
-        ORDER BY c.cycle_index, f.id
+        ORDER BY p.created_at, f.id
         """,
         (contract_id,),
     ).fetchall()
@@ -412,21 +629,21 @@ def positions_for_contract(
     return positions
 
 
-def positions_before_cycle(
+def positions_before_phase(
     conn: sqlite3.Connection,
     contract_id: str,
-    cycle_index: int,
+    before_ts: float,
 ) -> Dict[str, int]:
-    """Positions built from all fills in cycles with index < `cycle_index`."""
+    """Positions built from all fills in phases created before `before_ts`."""
     positions: Dict[str, int] = {}
     rows = conn.execute(
         """
         SELECT f.buyer_account_id, f.seller_account_id, f.size
         FROM fills f
-        JOIN cycle_states c ON f.cycle_id = c.id
-        WHERE c.contract_id = ? AND c.cycle_index < ?
+        JOIN phase_states p ON f.phase_id = p.id
+        WHERE p.contract_id = ? AND p.created_at < ?
         """,
-        (contract_id, cycle_index),
+        (contract_id, before_ts),
     ).fetchall()
     for r in rows:
         b, s, sz = r["buyer_account_id"], r["seller_account_id"], r["size"]
@@ -441,12 +658,12 @@ def upsert_market(conn: sqlite3.Connection, market: Market) -> None:
     conn.execute(
         """
         INSERT INTO markets (
-            id, name, description, multiplier, position_limit, num_cycles,
-            max_size, settlement_date, state, current_cycle, pending_mm,
+            id, name, description, multiplier, position_limit,
+            max_size, settlement_date, state, pending_mm, last_phase_ts,
             created_at
         ) VALUES (
-            :id, :name, :description, :multiplier, :position_limit, :num_cycles,
-            :max_size, :settlement_date, :state, :current_cycle, :pending_mm,
+            :id, :name, :description, :multiplier, :position_limit,
+            :max_size, :settlement_date, :state, :pending_mm, :last_phase_ts,
             :created_at
         )
         ON CONFLICT(id) DO UPDATE SET
@@ -454,12 +671,11 @@ def upsert_market(conn: sqlite3.Connection, market: Market) -> None:
             description     = excluded.description,
             multiplier      = excluded.multiplier,
             position_limit  = excluded.position_limit,
-            num_cycles      = excluded.num_cycles,
             max_size        = excluded.max_size,
             settlement_date = excluded.settlement_date,
             state           = excluded.state,
-            current_cycle   = excluded.current_cycle,
-            pending_mm      = excluded.pending_mm
+            pending_mm      = excluded.pending_mm,
+            last_phase_ts   = excluded.last_phase_ts
         """,
         market.__dict__,
     )
@@ -470,31 +686,43 @@ def get_market(conn: sqlite3.Connection, market_id: str) -> Optional[Market]:
     row = conn.execute(
         "SELECT * FROM markets WHERE id = ?", (market_id,),
     ).fetchone()
-    return Market(**dict(row)) if row else None
+    if row is None:
+        return None
+    d = dict(row)
+    # Drop legacy columns that may still exist in old databases.
+    d.pop("num_cycles", None)
+    d.pop("current_cycle", None)
+    return Market(**d)
 
 
 def list_markets(conn: sqlite3.Connection) -> List[Market]:
     rows = conn.execute(
         "SELECT * FROM markets ORDER BY created_at, id"
     ).fetchall()
-    return [Market(**dict(r)) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d.pop("num_cycles", None)
+        d.pop("current_cycle", None)
+        out.append(Market(**d))
+    return out
 
 
 def update_market_progress(
     conn: sqlite3.Connection,
     market_id: str,
     state: str,
-    current_cycle: int,
     pending_mm: int,
+    last_phase_ts: float = 0.0,
 ) -> None:
     """Persist a market's runtime progress fields after a phase step."""
     conn.execute(
         """
         UPDATE markets
-           SET state = ?, current_cycle = ?, pending_mm = ?
+           SET state = ?, pending_mm = ?, last_phase_ts = ?
          WHERE id = ?
         """,
-        (state, current_cycle, pending_mm, market_id),
+        (state, pending_mm, last_phase_ts, market_id),
     )
     conn.commit()
 

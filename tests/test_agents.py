@@ -3,7 +3,6 @@
 Covers:
 - JSON stripping / coercion helpers
 - OpenRouterAgent end-to-end via a fake httpx-compatible client
-- HumanAgent end-to-end via scripted input/output
 - Pass / skip semantics
 """
 
@@ -13,7 +12,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modelx.agents.base import AgentContext, format_book
-from modelx.agents.human import HumanAgent
 from modelx.agents.openrouter import (
     OpenRouterAgent,
     parse_response,
@@ -132,10 +130,10 @@ class FakeClient:
 def _ctx(**overrides):
     base = dict(
         account_id="mm-A",
-        cycle_id="cpi:0",
+        phase_id="cpi:1000000",
         contract=Contract(id="cpi", name="CPI", description="MoM CPI print"),
-        cycle_number=1,
-        total_cycles=10,
+        phase_type="MM",
+        phase_timestamp=1000000.0,
         position=0,
         pnl=0.0,
         trade_history="(no trades yet)",
@@ -152,8 +150,8 @@ def test_openrouter_get_quote():
     agent = OpenRouterAgent(model="anthropic/claude-sonnet-4", client=fake)
     quote = agent.get_quote(_ctx())
     assert quote is not None
-    assert quote.id == "cpi:0:mm-A:q"
-    assert quote.cycle_id == "cpi:0"
+    assert quote.id == "cpi:1000000:mm-A:q"
+    assert quote.phase_id == "cpi:1000000"
     assert quote.contract_id == "cpi"
     assert quote.account_id == "mm-A"
     assert quote.bid_price == 100.0
@@ -180,7 +178,7 @@ def test_openrouter_get_order_buy():
     assert order.account_id == "hf-X"
     assert order.side == "buy"
     assert order.size == 3
-    assert order.id == "cpi:0:hf-X:o"
+    assert order.id == "cpi:1000000:hf-X:o"
 
 
 def test_openrouter_get_order_pass_explicit():
@@ -216,7 +214,7 @@ def test_openrouter_traces_capture_quote_and_order():
     assert len(agent.traces) == 1
     t = agent.traces[0]
     assert t["phase"] == "MM"
-    assert t["cycle_id"] == "cpi:0"
+    assert t["phase_id"] == "cpi:1000000"
     assert t["account_id"] == "mm-A"
     assert t["model"] == "anthropic/claude-sonnet-4"
     assert "neutral stance" in t["raw_response"]
@@ -256,58 +254,6 @@ def test_openrouter_traces_capture_pass_and_error():
     assert err_trace["decision"] is None
 
 
-# ---------- HumanAgent ----------
-
-class ScriptedIO:
-    """Replays scripted inputs and captures outputs."""
-
-    def __init__(self, lines):
-        self._lines = list(lines)
-        self.outputs = []
-
-    def input(self, prompt=""):
-        self.outputs.append(("input", prompt))
-        return self._lines.pop(0)
-
-    def print(self, *args):
-        self.outputs.append(("print", " ".join(str(a) for a in args)))
-
-
-def test_human_get_quote():
-    io = ScriptedIO(["y", "100", "5", "101", "5"])
-    agent = HumanAgent(input_fn=io.input, output_fn=io.print)
-    quote = agent.get_quote(_ctx())
-    assert quote is not None
-    assert quote.bid_price == 100.0
-    assert quote.bid_size == 5
-    assert quote.ask_price == 101.0
-    assert quote.ask_size == 5
-
-
-def test_human_get_quote_skip():
-    io = ScriptedIO(["n"])
-    agent = HumanAgent(input_fn=io.input, output_fn=io.print)
-    assert agent.get_quote(_ctx()) is None
-
-
-def test_human_get_order_pass():
-    io = ScriptedIO(["pass"])
-    agent = HumanAgent(input_fn=io.input, output_fn=io.print)
-    assert agent.get_order(_ctx(account_id="hf-X"), book=[]) is None
-
-
-def test_human_get_order_buy():
-    io = ScriptedIO(["buy", "4"])
-    agent = HumanAgent(input_fn=io.input, output_fn=io.print)
-    order = agent.get_order(
-        _ctx(account_id="hf-X"),
-        book=[BookLevel("mm-A", "ask", 100.0, 10)],
-    )
-    assert order is not None
-    assert order.side == "buy"
-    assert order.size == 4
-
-
 TESTS = [
     test_strip_json_raw,
     test_strip_json_with_fence,
@@ -326,10 +272,6 @@ TESTS = [
     test_openrouter_get_order_invalid_side,
     test_openrouter_traces_capture_quote_and_order,
     test_openrouter_traces_capture_pass_and_error,
-    test_human_get_quote,
-    test_human_get_quote_skip,
-    test_human_get_order_pass,
-    test_human_get_order_buy,
 ]
 
 

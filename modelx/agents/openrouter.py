@@ -92,7 +92,7 @@ class OpenRouterAgent(Agent):
         self,
         model: str,
         api_key: Optional[str] = None,
-        timeout: float = 60.0,
+        timeout: Optional[float] = None,
         client: Optional[Any] = None,
     ):
         self.model = model
@@ -101,7 +101,10 @@ class OpenRouterAgent(Agent):
             raise ValueError(
                 "OpenRouterAgent: no API key. Set OPENROUTER_API_KEY or pass api_key="
             )
-        self.timeout = timeout
+        if timeout is not None:
+            self.timeout = timeout
+        else:
+            self.timeout = float(os.environ.get("OPENROUTER_TIMEOUT", "60"))
         self._client = client
         # Per-call trace log: each entry has phase / cycle / request / response
         # / parsed JSON / decision (or error). Caller dumps this to disk after
@@ -183,10 +186,12 @@ class OpenRouterAgent(Agent):
         decision: Optional[Dict[str, Any]] = None,
         error: Optional[str] = None,
     ) -> None:
+        from datetime import datetime
         self.traces.append({
             "phase": phase,
-            "cycle_id": ctx.cycle_id,
-            "cycle_number": ctx.cycle_number,
+            "phase_id": ctx.phase_id,
+            "phase_type": ctx.phase_type,
+            "timestamp": ctx.phase_timestamp,
             "account_id": ctx.account_id,
             "model": self.model,
             "request": prompt,
@@ -195,6 +200,12 @@ class OpenRouterAgent(Agent):
             "decision": decision,
             "error": error,
         })
+
+    @staticmethod
+    def _phase_display(ctx: AgentContext) -> str:
+        from datetime import datetime
+        dt = datetime.fromtimestamp(ctx.phase_timestamp)
+        return f"{ctx.phase_type} @ {dt.strftime('%Y-%m-%d %H:%M')}"
 
     def _build_mm_prompt(self, ctx: AgentContext) -> str:
         return MM_SYSTEM_PROMPT.format(
@@ -205,8 +216,7 @@ class OpenRouterAgent(Agent):
             multiplier=ctx.contract.multiplier,
             position=ctx.position,
             pnl=ctx.pnl,
-            cycle_number=ctx.cycle_number,
-            total_cycles=ctx.total_cycles,
+            phase_display=self._phase_display(ctx),
             trade_history=ctx.trade_history,
             information_log=ctx.information_log,
         )
@@ -220,8 +230,7 @@ class OpenRouterAgent(Agent):
             multiplier=ctx.contract.multiplier,
             position=ctx.position,
             pnl=ctx.pnl,
-            cycle_number=ctx.cycle_number,
-            total_cycles=ctx.total_cycles,
+            phase_display=self._phase_display(ctx),
             trade_history=ctx.trade_history,
             information_log=ctx.information_log,
             order_book=format_book(book),
@@ -235,8 +244,8 @@ class OpenRouterAgent(Agent):
     ) -> Quote:
         parsed = parse_response(raw_response)
         quote = Quote(
-            id=f"{ctx.cycle_id}:{ctx.account_id}:q",
-            cycle_id=ctx.cycle_id,
+            id=f"{ctx.phase_id}:{ctx.account_id}:q",
+            phase_id=ctx.phase_id,
             contract_id=ctx.contract.id,
             account_id=ctx.account_id,
             bid_price=to_float(parsed.get("bid_price")),
@@ -271,8 +280,8 @@ class OpenRouterAgent(Agent):
             )
             return None
         order = Order(
-            id=f"{ctx.cycle_id}:{ctx.account_id}:o",
-            cycle_id=ctx.cycle_id,
+            id=f"{ctx.phase_id}:{ctx.account_id}:o",
+            phase_id=ctx.phase_id,
             contract_id=ctx.contract.id,
             account_id=ctx.account_id,
             side=side,

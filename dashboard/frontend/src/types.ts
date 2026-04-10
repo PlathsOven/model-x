@@ -36,17 +36,14 @@ export type MarketState =
 
 export interface Episode {
   contract: ContractInfo | null;
-  // Live multi-market fields. Legacy demo dashboards still get sensible
-  // defaults (market_state derived from settlement_value).
   market_state?: MarketState;
-  current_cycle?: number;
-  num_cycles: number;
+  phase_count?: number;
+  last_phase_ts?: number;
   settled: boolean;
   accounts: AccountSummary[];
   stats: EpisodeStats;
   traces_loaded: boolean;
   sources: { db_path: string; traces_path: string };
-  // Live-update status fields populated by /api/episode on every poll.
   loaded: boolean;
   status: EpisodeStatus;
   status_detail: string | null;
@@ -60,8 +57,8 @@ export interface MarketSummary {
   name: string;
   description: string;
   state: MarketState;
-  current_cycle: number;
-  num_cycles: number;
+  phase_count: number;
+  last_phase_ts: number;
   settlement_date: string | null;
   settlement_value: number | null;
   multiplier: number;
@@ -93,12 +90,11 @@ export interface LifetimeMetrics {
   agents: Record<string, LifetimeAgent>;
 }
 
-export interface CycleRow {
-  cycle_index: number;
-  cycle_id: string;
-  phase: "MM_OPEN" | "HF_OPEN" | "HF_CLOSED" | "MM_CLOSED";
-  mm_mark: number | null;
-  hf_mark: number | null;
+export interface PhaseRow {
+  phase_id: string;
+  phase_type: "MM" | "HF";
+  timestamp: number;
+  phase: "OPEN" | "CLOSED";
   mark: number | null;
   num_quotes: number;
   num_orders: number;
@@ -109,8 +105,8 @@ export interface CycleRow {
 
 export interface FillRow {
   id: string;
-  cycle_index: number;
-  cycle_id: string;
+  phase_id: string;
+  timestamp: number;
   phase: "MM" | "HF";
   buyer: string;
   seller: string;
@@ -120,8 +116,8 @@ export interface FillRow {
 }
 
 export interface QuoteRow {
-  cycle_index: number;
-  cycle_id: string;
+  phase_id: string;
+  timestamp: number;
   account_id: string;
   bid_price: number;
   bid_size: number;
@@ -130,8 +126,8 @@ export interface QuoteRow {
 }
 
 export interface OrderRow {
-  cycle_index: number;
-  cycle_id: string;
+  phase_id: string;
+  timestamp: number;
   account_id: string;
   side: "buy" | "sell";
   size: number;
@@ -145,11 +141,11 @@ export interface BookLevel {
 }
 
 export interface Orderbook {
-  cycle_index: number;
-  cycle_id: string;
+  phase_id: string;
+  phase_type: string;
+  timestamp: number;
   phase: string;
-  mm_mark: number | null;
-  hf_mark: number | null;
+  mark: number | null;
   quotes: {
     account_id: string;
     bid_price: number;
@@ -167,8 +163,9 @@ export interface Orderbook {
 
 export interface TraceEntry {
   phase: "MM" | "HF";
-  cycle_id: string;
-  cycle_number: number;
+  phase_id: string;
+  phase_type: string;
+  timestamp: number;
   account_id: string;
   model: string;
   request: string;
@@ -202,23 +199,22 @@ export interface AgentTraces {
 export interface AllTraces {
   loaded: boolean;
   contract?: any;
-  num_cycles?: number;
   info_schedule?: Record<string, string>;
   agents?: Record<string, AgentTraces>;
 }
 
 export interface MMScoresDict {
   account_id: string;
-  total_pnl: number | null;
-  sharpe: number | null;
+  total_pnl: number;
+  sharpe: number;
   volume: number;
   volume_share: number;
-  pnl_bps: number | null;
+  pnl_bps: number;
   uptime: number;
   consensus: number;
-  markout_1: number | null;
-  markout_5: number | null;
-  markout_20: number | null;
+  markout_2: number;
+  markout_10: number;
+  markout_40: number;
   avg_abs_position: number;
   self_cross_count: number;
   self_cross_volume: number;
@@ -226,11 +222,11 @@ export interface MMScoresDict {
 
 export interface HFScoresDict {
   account_id: string;
-  total_pnl: number | null;
-  sharpe: number | null;
-  markout_1: number | null;
-  markout_5: number | null;
-  markout_20: number | null;
+  total_pnl: number;
+  sharpe: number;
+  markout_2: number;
+  markout_10: number;
+  markout_40: number;
 }
 
 export interface Metrics {
@@ -240,7 +236,8 @@ export interface Metrics {
 }
 
 export interface PositionPoint {
-  cycle_index: number;
+  timestamp: number;
+  phase_type: string;
   position: number;
   cash: number;
   pnl_mtm: number;
@@ -252,10 +249,10 @@ export interface PositionsResponse {
 }
 
 export interface TimeseriesRow {
-  cycle_index: number;
+  phase_id: string;
+  phase_type: string;
+  timestamp: number;
   phase: string;
-  mm_mark: number | null;
-  hf_mark: number | null;
   mark: number | null;
   quotes_by_agent: Record<
     string,
@@ -268,10 +265,12 @@ export interface TimeseriesRow {
     }
   >;
   info: string | null;
+  closed_at: number | null;
 }
 
 export interface TimeseriesFill {
-  cycle_index: number;
+  phase_id: string;
+  timestamp: number;
   price: number;
   size: number;
   phase: "MM" | "HF";
@@ -281,11 +280,11 @@ export interface TimeseriesFill {
 }
 
 export interface Timeseries {
-  cycles: TimeseriesRow[];
+  phases: TimeseriesRow[];
   fills: TimeseriesFill[];
   settlement: number | null;
-  info_cycles: number[];
-  info_by_cycle: Record<string, string>;
+  info_phases: string[];
+  info_by_phase: Record<string, string>;
   mm_accounts: string[];
   hf_accounts: string[];
 }
