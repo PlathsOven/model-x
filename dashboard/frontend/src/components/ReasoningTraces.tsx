@@ -162,7 +162,6 @@ function TraceCard({
 }: {
   trace: TraceEntry & { agent_id: string; role: "MM" | "HF" };
 }) {
-  const [showRequest, setShowRequest] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
   const hasError = !!trace.error;
   const parsed = trace.parsed || {};
@@ -226,21 +225,6 @@ function TraceCard({
             </div>
             <DecisionBlock data={decision} highlighted />
           </div>
-        </div>
-
-        <div className="pt-1">
-          <button
-            onClick={() => setShowRequest((v) => !v)}
-            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200"
-          >
-            {showRequest ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            Prompt
-          </button>
-          {showRequest && (
-            <pre className="mt-1 p-3 rounded border border-zinc-800 bg-zinc-950 text-[11px] font-mono text-zinc-400 whitespace-pre-wrap max-h-72 overflow-auto">
-              {trace.request}
-            </pre>
-          )}
         </div>
 
         <div>

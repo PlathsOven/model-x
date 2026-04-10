@@ -1,27 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { LucideIcon } from "lucide-react";
 import {
   Activity,
-  BarChart3,
-  BookOpen,
-  Globe,
-  Home,
-  LineChart as LineChartIcon,
-  ListTree,
-  MessageSquare,
   RefreshCw,
-  Trophy,
 } from "lucide-react";
 import { api } from "./api";
 import type { Episode, EpisodeStatus, MarketSummary } from "./types";
-import { EpisodeOverview } from "./components/EpisodeOverview";
 import { TimeSeriesChart } from "./components/TimeSeriesChart";
-import { TradeLog } from "./components/TradeLog";
-import { OrderbookViewer } from "./components/OrderbookViewer";
+import { TradesView } from "./components/TradesView";
 import { ReasoningTraces } from "./components/ReasoningTraces";
 import { PerformanceMetrics } from "./components/PerformanceMetrics";
 import { PositionTracker } from "./components/PositionTracker";
 import { LifetimeMetricsView } from "./components/LifetimeMetrics";
+import { ContextView } from "./components/ContextView";
+import { fmtInt } from "./lib/format";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -32,56 +23,44 @@ const STATUS_LABEL: Record<EpisodeStatus, string> = {
   error: "Backend hit an error reading the database.",
 };
 
-type ViewKey =
-  | "overview"
-  | "timeseries"
-  | "tradelog"
-  | "orderbook"
-  | "traces"
-  | "metrics"
+type TabKey =
+  | "performance"
   | "positions"
+  | "context"
+  | "reasoning"
+  | "trades"
   | "lifetime";
 
-interface NavItem {
-  key: ViewKey;
+interface TabItem {
+  key: TabKey;
   label: string;
-  icon: LucideIcon;
 }
 
-const NAV: NavItem[] = [
-  { key: "overview", label: "Overview", icon: Home },
-  { key: "timeseries", label: "Time Series", icon: LineChartIcon },
-  { key: "tradelog", label: "Trade Log", icon: ListTree },
-  { key: "orderbook", label: "Orderbook", icon: BookOpen },
-  { key: "metrics", label: "Metrics", icon: Trophy },
-  { key: "positions", label: "Positions", icon: BarChart3 },
-  { key: "traces", label: "Reasoning", icon: MessageSquare },
-  { key: "lifetime", label: "Lifetime", icon: Globe },
+const TABS: TabItem[] = [
+  { key: "performance", label: "Performance" },
+  { key: "positions", label: "Positions" },
+  { key: "context", label: "Context" },
+  { key: "reasoning", label: "Reasoning" },
+  { key: "trades", label: "Trades" },
+  { key: "lifetime", label: "Lifetime" },
 ];
 
 export default function App() {
-  const [active, setActive] = useState<ViewKey>("overview");
+  const [activeTab, setActiveTab] = useState<TabKey>("performance");
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloading, setReloading] = useState(false);
   const [focusPhaseId, setFocusPhaseId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now() / 1000);
 
-  // Multi-market state. `marketsList` is the dropdown source, `marketId`
-  // is the currently-selected market (null = default to first).
   const [marketsList, setMarketsList] = useState<MarketSummary[]>([]);
   const [marketId, setMarketId] = useState<string | null>(null);
 
-  // Keep a wall-clock tick going so the "updated Xs ago" string in the
-  // sidebar stays current even when the backend hasn't changed.
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now() / 1000), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Poll /api/episode every POLL_INTERVAL_MS. This is the only place that
-  // talks to the backend at the App level — child views fetch their own
-  // data via useEffect([dataVersion]).
   const loadEpisode = useCallback(async () => {
     try {
       const ep = await api.episode(marketId);
@@ -104,9 +83,6 @@ export default function App() {
         if (cancelled) return;
         setEpisode(ep);
         setMarketsList(mks);
-        // If the user hasn't picked a market and we just discovered some,
-        // implicitly use the first one — keeps the URL/state in sync with
-        // what /api/episode returned.
         if (marketId === null && mks.length > 0 && ep.contract) {
           setMarketId(ep.contract.id);
         }
@@ -136,17 +112,12 @@ export default function App() {
     }
   };
 
-  const jumpToPhase = useCallback((phaseId: string, view?: ViewKey) => {
+  const jumpToPhase = useCallback((phaseId: string) => {
     setFocusPhaseId(phaseId);
-    if (view) setActive(view);
   }, []);
 
-  // dataVersion is the prop that all view components depend on for re-fetching.
-  // Bumps whenever the backend reports a different load timestamp, which
-  // happens after every successful auto-reload.
   const dataVersion = episode?.loaded_at ?? 0;
 
-  // Sidebar status indicator: live (green) / waiting (amber) / error (red).
   const liveStatus = useMemo(() => {
     if (error) return { tone: "red" as const, label: "error", dot: "×" };
     if (!episode) return { tone: "zinc" as const, label: "loading", dot: "·" };
@@ -158,239 +129,260 @@ export default function App() {
     ? Math.max(0, Math.round(now - episode.loaded_at))
     : null;
 
+  const mmCount = episode?.accounts.filter((a) => a.role === "MM").length ?? 0;
+  const hfCount = episode?.accounts.filter((a) => a.role === "HF").length ?? 0;
+
+  const visibleTabs = useMemo(
+    () =>
+      TABS.filter(
+        (t) => t.key !== "lifetime" || marketsList.length > 1
+      ),
+    [marketsList]
+  );
+
   return (
-    <div className="flex h-full min-h-screen bg-zinc-900 text-zinc-100">
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 border-r border-zinc-800 bg-zinc-950/60 flex flex-col">
-        <div className="px-5 py-4 border-b border-zinc-800">
-          <div className="flex items-center gap-2">
-            <Activity className="text-emerald-400" size={22} />
-            <div>
-              <div className="font-semibold tracking-tight">ModelX</div>
-              <div className="text-[10px] uppercase tracking-widest text-zinc-500">
-                Debug Dashboard
-              </div>
-            </div>
+    <div className="flex flex-col h-full min-h-screen bg-zinc-900 text-zinc-100">
+      {/* Top bar */}
+      <header className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/80 backdrop-blur-sm">
+        <div className="flex items-center gap-4 px-5 py-2.5">
+          {/* Logo */}
+          <div className="flex items-center gap-2 shrink-0">
+            <Activity className="text-emerald-400" size={20} />
+            <span className="font-semibold tracking-tight text-sm">ModelX</span>
           </div>
-        </div>
 
-        <nav className="flex-1 overflow-y-auto py-3">
-          {NAV.map((item) => {
-            const Icon = item.icon;
-            const isActive = item.key === active;
-            return (
-              <button
-                key={item.key}
-                onClick={() => setActive(item.key)}
-                className={
-                  "flex w-full items-center gap-3 px-5 py-2 text-sm transition-colors " +
-                  (isActive
-                    ? "bg-zinc-800 text-white border-l-2 border-emerald-400"
-                    : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100 border-l-2 border-transparent")
-                }
-              >
-                <Icon size={16} />
-                {item.label}
-              </button>
-            );
-          })}
-        </nav>
-
-        <div className="p-4 border-t border-zinc-800 space-y-2">
-          {/* Live status pill */}
-          <div
-            className={
-              "flex items-center gap-2 rounded px-2 py-1.5 text-[10px] uppercase tracking-widest font-medium border " +
-              (liveStatus.tone === "emerald"
-                ? "bg-emerald-900/30 border-emerald-800 text-emerald-300"
-                : liveStatus.tone === "amber"
-                  ? "bg-amber-900/30 border-amber-800 text-amber-300"
-                  : liveStatus.tone === "red"
-                    ? "bg-red-900/30 border-red-800 text-red-300"
-                    : "bg-zinc-800 border-zinc-700 text-zinc-400")
-            }
-          >
-            <span aria-hidden>{liveStatus.dot}</span>
-            <span>{liveStatus.label}</span>
-            {updatedAgo !== null && (
-              <span className="ml-auto text-[9px] text-zinc-500 normal-case tracking-normal">
-                {updatedAgo === 0 ? "just now" : `${updatedAgo}s ago`}
+          {/* Contract name */}
+          {episode?.contract && (
+            <div className="min-w-0 hidden sm:block">
+              <span className="text-sm text-zinc-300 truncate">
+                {episode.contract.name}
               </span>
-            )}
-          </div>
-
-          <button
-            onClick={handleReload}
-            disabled={reloading}
-            className="flex items-center gap-2 px-3 py-2 w-full rounded text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-200 disabled:opacity-50"
-          >
-            <RefreshCw
-              size={14}
-              className={reloading ? "animate-spin" : ""}
-            />
-            {reloading ? "Reloading…" : "Reload data"}
-          </button>
-          {episode && (
-            <div className="text-[10px] text-zinc-500 font-mono break-all">
-              <div>db: {episode.sources.db_path}</div>
-              <div>traces: {episode.sources.traces_path}</div>
-              {episode.loaded && !episode.traces_loaded && (
-                <div className="text-amber-400 mt-1">⚠ traces missing</div>
+              {episode.contract.description && (
+                <span className="text-xs text-zinc-500 ml-2 truncate hidden lg:inline">
+                  {episode.contract.description}
+                </span>
               )}
             </div>
           )}
-        </div>
-      </aside>
 
-      {/* Main content */}
-      <main className="flex-1 overflow-y-auto">
-        {/* Multi-market selector header. Hidden on the lifetime tab (which
-            is global) and when there's nothing to select. */}
-        {marketsList.length > 0 && active !== "lifetime" && (
-          <MarketSelector
-            markets={marketsList}
-            value={marketId}
-            onChange={setMarketId}
-          />
-        )}
+          <div className="flex-1" />
 
-        {error && (
-          <div className="m-6 rounded border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
-            <div className="font-semibold mb-1">Error talking to backend</div>
-            <pre className="whitespace-pre-wrap font-mono text-xs">{error}</pre>
-            <div className="mt-2 text-zinc-400">
-              Make sure the backend is running (
-              <code className="font-mono text-zinc-300">python server.py</code>
-              ). The dashboard will reconnect automatically once it's reachable.
+          {/* Market selector */}
+          {marketsList.length > 0 && activeTab !== "lifetime" && (
+            <div className="flex items-center gap-2 shrink-0">
+              <select
+                value={marketId ?? marketsList[0]?.id ?? ""}
+                onChange={(e) => setMarketId(e.target.value)}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs font-mono text-zinc-100 focus:outline-none focus:border-emerald-500"
+              >
+                {marketsList.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+              {(() => {
+                const selected = marketsList.find(
+                  (m) => m.id === (marketId ?? marketsList[0]?.id)
+                );
+                if (!selected) return null;
+                return (
+                  <span
+                    className={
+                      "rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider border " +
+                      (selected.state === "RUNNING"
+                        ? "border-emerald-800 bg-emerald-900/30 text-emerald-300"
+                        : selected.state === "PENDING_SETTLEMENT"
+                          ? "border-amber-800 bg-amber-900/30 text-amber-300"
+                          : selected.state === "SETTLED"
+                            ? "border-blue-800 bg-blue-900/30 text-blue-300"
+                            : "border-zinc-700 bg-zinc-800 text-zinc-300")
+                    }
+                  >
+                    {selected.state.toLowerCase().replace("_", " ")}
+                  </span>
+                );
+              })()}
             </div>
+          )}
+
+          {/* Status + reload */}
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              className={
+                "text-xs " +
+                (liveStatus.tone === "emerald"
+                  ? "text-emerald-400"
+                  : liveStatus.tone === "amber"
+                    ? "text-amber-400"
+                    : liveStatus.tone === "red"
+                      ? "text-red-400"
+                      : "text-zinc-500")
+              }
+            >
+              {liveStatus.dot}
+            </span>
+            {updatedAgo !== null && (
+              <span className="text-[10px] text-zinc-500">
+                {updatedAgo === 0 ? "now" : `${updatedAgo}s`}
+              </span>
+            )}
+            <button
+              onClick={handleReload}
+              disabled={reloading}
+              className="p-1.5 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100 disabled:opacity-50"
+              title="Reload data"
+            >
+              <RefreshCw
+                size={14}
+                className={reloading ? "animate-spin" : ""}
+              />
+            </button>
           </div>
-        )}
+        </div>
+      </header>
 
-        {!episode && !error && (
-          <div className="p-8 text-zinc-500 text-sm">Loading…</div>
-        )}
-
-        {episode && !episode.loaded && active !== "lifetime" && (
-          <WaitingScreen episode={episode} />
-        )}
-
-        {/* Lifetime tab is global — it works even when no individual market
-            is loaded yet, so we render it independently of episode.loaded. */}
-        {active === "lifetime" && (
-          <div className="p-6">
-            <LifetimeMetricsView dataVersion={dataVersion} />
+      {/* Error banner */}
+      {error && (
+        <div className="mx-6 mt-4 rounded border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
+          <div className="font-semibold mb-1">Error talking to backend</div>
+          <pre className="whitespace-pre-wrap font-mono text-xs">{error}</pre>
+          <div className="mt-2 text-zinc-400">
+            Make sure the backend is running (
+            <code className="font-mono text-zinc-300">python server.py</code>
+            ). The dashboard will reconnect automatically.
           </div>
-        )}
+        </div>
+      )}
 
-        {episode && episode.loaded && active !== "lifetime" && (
+      {/* Loading / waiting states */}
+      {!episode && !error && (
+        <div className="p-8 text-zinc-500 text-sm">Loading…</div>
+      )}
+
+      {episode && !episode.loaded && (
+        <WaitingScreen episode={episode} />
+      )}
+
+      {/* Main content — hero chart + tabs */}
+      {episode && episode.loaded && (
+        <main className="flex-1 overflow-y-auto">
+          {/* Hero: Time Series Chart */}
+          <div className="px-4 pt-3" style={{ height: "calc(70vh - 48px)", minHeight: 360 }}>
+            <TimeSeriesChart
+              episode={episode}
+              dataVersion={dataVersion}
+              focusPhaseId={focusPhaseId}
+              onClearFocus={() => setFocusPhaseId(null)}
+              marketId={marketId}
+            />
+          </div>
+
+          {/* Summary stats row */}
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-1 px-6 py-2.5 border-b border-zinc-800 text-xs text-zinc-400">
+            <Stat label="Phases" value={fmtInt(episode.phase_count ?? 0)} />
+            <Stat
+              label="Agents"
+              value={`${episode.accounts.length}`}
+              sub={`${mmCount} MM · ${hfCount} HF`}
+            />
+            <Stat
+              label="Fills"
+              value={fmtInt(episode.stats.total_fills)}
+              sub={`${episode.stats.total_volume} vol`}
+            />
+            {episode.settled && episode.contract?.settlement_value != null && (
+              <Stat
+                label="Settlement"
+                value={episode.contract.settlement_value.toFixed(4)}
+                className="text-emerald-400"
+              />
+            )}
+            {!episode.settled && (
+              <Stat label="Status" value="Unsettled" className="text-amber-400" />
+            )}
+          </div>
+
+          {/* Horizontal tab bar */}
+          <nav className="flex items-center gap-1 px-6 py-2 border-b border-zinc-800 overflow-x-auto">
+            {visibleTabs.map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={
+                  "px-3 py-1.5 rounded text-sm whitespace-nowrap transition-colors " +
+                  (activeTab === tab.key
+                    ? "bg-zinc-800 text-white font-medium"
+                    : "text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-200")
+                }
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+
+          {/* Tab content */}
           <div className="p-6">
-            {active === "overview" && (
-              <EpisodeOverview
-                episode={episode}
-                dataVersion={dataVersion}
-                marketId={marketId}
-              />
-            )}
-            {active === "timeseries" && (
-              <TimeSeriesChart
-                episode={episode}
-                dataVersion={dataVersion}
-                focusPhaseId={focusPhaseId}
-                onClearFocus={() => setFocusPhaseId(null)}
-                marketId={marketId}
-              />
-            )}
-            {active === "tradelog" && (
-              <TradeLog
-                episode={episode}
-                dataVersion={dataVersion}
-                onPhaseClick={(phaseId) => jumpToPhase(phaseId, "timeseries")}
-                marketId={marketId}
-              />
-            )}
-            {active === "orderbook" && (
-              <OrderbookViewer
-                episode={episode}
-                dataVersion={dataVersion}
-                initialPhaseId={focusPhaseId ?? undefined}
-                marketId={marketId}
-              />
-            )}
-            {active === "metrics" && (
+            {activeTab === "performance" && (
               <PerformanceMetrics
                 episode={episode}
                 dataVersion={dataVersion}
                 marketId={marketId}
               />
             )}
-            {active === "positions" && (
+            {activeTab === "positions" && (
               <PositionTracker
                 episode={episode}
                 dataVersion={dataVersion}
                 marketId={marketId}
               />
             )}
-            {active === "traces" && (
+            {activeTab === "context" && (
+              <ContextView
+                episode={episode}
+                dataVersion={dataVersion}
+                marketId={marketId}
+              />
+            )}
+            {activeTab === "reasoning" && (
               <ReasoningTraces episode={episode} dataVersion={dataVersion} />
             )}
+            {activeTab === "trades" && (
+              <TradesView
+                episode={episode}
+                dataVersion={dataVersion}
+                onPhaseClick={jumpToPhase}
+                focusPhaseId={focusPhaseId}
+                marketId={marketId}
+              />
+            )}
+            {activeTab === "lifetime" && (
+              <LifetimeMetricsView dataVersion={dataVersion} />
+            )}
           </div>
-        )}
-      </main>
+        </main>
+      )}
     </div>
   );
 }
 
-function MarketSelector({
-  markets,
+function Stat({
+  label,
   value,
-  onChange,
+  sub,
+  className = "text-zinc-100",
 }: {
-  markets: MarketSummary[];
-  value: string | null;
-  onChange: (id: string) => void;
+  label: string;
+  value: string;
+  sub?: string;
+  className?: string;
 }) {
-  // Use the first market as the visible default when no value is set yet.
-  const current = value ?? markets[0]?.id ?? "";
-  const selected = markets.find((m) => m.id === current);
-
   return (
-    <div className="border-b border-zinc-800 bg-zinc-950/40 px-6 py-3 flex items-center gap-3">
-      <span className="text-[10px] uppercase tracking-widest text-zinc-500">
-        Market
-      </span>
-      <select
-        value={current}
-        onChange={(e) => onChange(e.target.value)}
-        className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm font-mono text-zinc-100 focus:outline-none focus:border-emerald-500"
-      >
-        {markets.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.name} ({m.id})
-          </option>
-        ))}
-      </select>
-      {selected && (
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          <span
-            className={
-              "rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider border " +
-              (selected.state === "RUNNING"
-                ? "border-emerald-800 bg-emerald-900/30 text-emerald-300"
-                : selected.state === "PENDING_SETTLEMENT"
-                  ? "border-amber-800 bg-amber-900/30 text-amber-300"
-                  : selected.state === "SETTLED"
-                    ? "border-blue-800 bg-blue-900/30 text-blue-300"
-                    : "border-zinc-700 bg-zinc-800 text-zinc-300")
-            }
-          >
-            {selected.state.toLowerCase().replace("_", " ")}
-          </span>
-          {selected.settlement_date && (
-            <span>· settles {selected.settlement_date}</span>
-          )}
-        </div>
-      )}
-    </div>
+    <span className="flex items-center gap-1.5">
+      <span className="text-zinc-500">{label}:</span>
+      <span className={`font-medium ${className}`}>{value}</span>
+      {sub && <span className="text-zinc-600">{sub}</span>}
+    </span>
   );
 }
 

@@ -4,7 +4,6 @@ import type { Episode, Timeseries } from "../types";
 import { PHASE_COLORS, buildAgentColors } from "../lib/colors";
 import { fmtPrice } from "../lib/format";
 import { Plot, DARK_LAYOUT, PLOTLY_CONFIG } from "../lib/plotly-theme";
-import { Card, SectionHeader } from "./ui";
 
 interface LayerToggles {
   mark: boolean;
@@ -428,21 +427,12 @@ export function TimeSeriesChart({
     }
 
     // Build tick values and labels for x-axis.
-    const tickvals = chartRows.map((r) => r.xIndex);
-    const ticktext = chartRows.map((r) => {
-      if (r.phase === "S") return "Settle";
-      return `${formatTime(r.xIndex)} ${r.phase === "MM" ? "M" : "H"}`;
-    });
-
     const layout: any = {
       ...DARK_LAYOUT,
       xaxis: {
         ...DARK_LAYOUT.xaxis,
-        tickvals,
-        ticktext,
-        tickangle: -45,
-        tickfont: { size: 9, color: "#71717a" },
-        type: "linear",
+        type: "date",
+        tickfont: { size: 10, color: "#71717a" },
       },
       yaxis: {
         ...DARK_LAYOUT.yaxis,
@@ -451,16 +441,8 @@ export function TimeSeriesChart({
       },
       shapes,
       annotations,
-      showlegend: true,
-      legend: {
-        ...DARK_LAYOUT.legend,
-        orientation: "h" as const,
-        x: 0,
-        y: -0.15,
-        xanchor: "left",
-        yanchor: "top",
-      },
-      margin: { t: 20, r: 30, b: 80, l: 60 },
+      showlegend: false,
+      margin: { t: 10, r: 30, b: 40, l: 60 },
     };
 
     return { traces, layout };
@@ -488,131 +470,120 @@ export function TimeSeriesChart({
   if (!ts) return <div className="text-sm text-zinc-500">Loading...</div>;
 
   return (
-    <div className="space-y-4">
-      <SectionHeader
-        title="Time series"
-        subtitle="Marks · fills · quote whiskers · info events"
-        action={
-          focusPhaseId !== null && (
+    <div className="flex flex-col h-full">
+      <div className="flex-1 min-h-0">
+        <Plot
+          data={traces}
+          layout={layout}
+          config={PLOTLY_CONFIG as any}
+          useResizeHandler
+          style={{ width: "100%", height: "100%" }}
+        />
+      </div>
+
+      {/* Layer toggles + agent chips — compact row pinned below chart */}
+      <div className="flex flex-wrap items-center gap-2 text-xs px-1 pt-2 shrink-0">
+        <LayerToggle
+          label="Mark"
+          color="#ffffff"
+          on={toggles.mark}
+          onClick={() => setToggles((t) => ({ ...t, mark: !t.mark }))}
+        />
+        <LayerToggle
+          label="MM fills"
+          color={PHASE_COLORS.MM}
+          on={toggles.mmFills}
+          onClick={() => setToggles((t) => ({ ...t, mmFills: !t.mmFills }))}
+        />
+        <LayerToggle
+          label="HF fills"
+          color={PHASE_COLORS.HF}
+          on={toggles.hfFills}
+          onClick={() => setToggles((t) => ({ ...t, hfFills: !t.hfFills }))}
+        />
+        <LayerToggle
+          label="Whiskers"
+          color="#a1a1aa"
+          on={toggles.quoteRanges}
+          onClick={() =>
+            setToggles((t) => ({ ...t, quoteRanges: !t.quoteRanges }))
+          }
+        />
+        <LayerToggle
+          label="Settlement"
+          color="#10b981"
+          on={toggles.settlement}
+          dashed
+          onClick={() =>
+            setToggles((t) => ({ ...t, settlement: !t.settlement }))
+          }
+        />
+        <LayerToggle
+          label="Info"
+          color="#f59e0b"
+          on={toggles.info}
+          dashed
+          onClick={() => setToggles((t) => ({ ...t, info: !t.info }))}
+        />
+
+        <span className="w-px h-4 bg-zinc-700 mx-1" />
+
+        {ts.mm_accounts.map((a) => (
+          <AgentChip
+            key={a}
+            id={a}
+            color={agentColors[a]}
+            role="MM"
+            hidden={hiddenAgents.has(a)}
+            onClick={() =>
+              setHiddenAgents((s) => {
+                const next = new Set(s);
+                if (next.has(a)) next.delete(a);
+                else next.add(a);
+                return next;
+              })
+            }
+          />
+        ))}
+        {ts.hf_accounts.map((a) => (
+          <AgentChip
+            key={a}
+            id={a}
+            color={agentColors[a]}
+            role="HF"
+            hidden={hiddenAgents.has(a)}
+            onClick={() =>
+              setHiddenAgents((s) => {
+                const next = new Set(s);
+                if (next.has(a)) next.delete(a);
+                else next.add(a);
+                return next;
+              })
+            }
+          />
+        ))}
+
+        {hiddenAgents.size > 0 && (
+          <button
+            onClick={() => setHiddenAgents(new Set())}
+            className="text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-700 rounded px-2 py-1"
+          >
+            show all
+          </button>
+        )}
+
+        {focusPhaseId !== null && (
+          <>
+            <span className="w-px h-4 bg-zinc-700 mx-1" />
             <button
               onClick={onClearFocus}
-              className="text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-700 rounded px-2 py-1"
+              className="text-xs text-red-400 hover:text-red-200 border border-red-800 rounded px-2 py-1"
             >
               clear focus
             </button>
-          )
-        }
-      />
-
-      <Card>
-        <div style={{ width: "100%", height: 540 }}>
-          <Plot
-            data={traces}
-            layout={layout}
-            config={PLOTLY_CONFIG as any}
-            useResizeHandler
-            style={{ width: "100%", height: "100%" }}
-          />
-        </div>
-
-        {/* Layer legend + toggles */}
-        <div className="mt-4 flex flex-wrap gap-2 text-xs">
-          <LayerToggle
-            label="Mark"
-            color="#ffffff"
-            on={toggles.mark}
-            onClick={() => setToggles((t) => ({ ...t, mark: !t.mark }))}
-          />
-          <LayerToggle
-            label="MM fills"
-            color={PHASE_COLORS.MM}
-            on={toggles.mmFills}
-            onClick={() => setToggles((t) => ({ ...t, mmFills: !t.mmFills }))}
-          />
-          <LayerToggle
-            label="HF fills"
-            color={PHASE_COLORS.HF}
-            on={toggles.hfFills}
-            onClick={() => setToggles((t) => ({ ...t, hfFills: !t.hfFills }))}
-          />
-          <LayerToggle
-            label="Quote whiskers"
-            color="#a1a1aa"
-            on={toggles.quoteRanges}
-            onClick={() =>
-              setToggles((t) => ({ ...t, quoteRanges: !t.quoteRanges }))
-            }
-          />
-          <LayerToggle
-            label="Settlement"
-            color="#10b981"
-            on={toggles.settlement}
-            dashed
-            onClick={() =>
-              setToggles((t) => ({ ...t, settlement: !t.settlement }))
-            }
-          />
-          <LayerToggle
-            label="Info events"
-            color="#f59e0b"
-            on={toggles.info}
-            dashed
-            onClick={() => setToggles((t) => ({ ...t, info: !t.info }))}
-          />
-        </div>
-      </Card>
-
-      {/* Agent color legend (clickable to toggle visibility) */}
-      <Card
-        title="Agents"
-        action={
-          hiddenAgents.size > 0 ? (
-            <button
-              onClick={() => setHiddenAgents(new Set())}
-              className="text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-700 rounded px-2 py-1"
-            >
-              show all ({hiddenAgents.size} hidden)
-            </button>
-          ) : null
-        }
-      >
-        <div className="flex flex-wrap gap-3 text-xs">
-          {ts.mm_accounts.map((a) => (
-            <AgentChip
-              key={a}
-              id={a}
-              color={agentColors[a]}
-              role="MM"
-              hidden={hiddenAgents.has(a)}
-              onClick={() =>
-                setHiddenAgents((s) => {
-                  const next = new Set(s);
-                  if (next.has(a)) next.delete(a);
-                  else next.add(a);
-                  return next;
-                })
-              }
-            />
-          ))}
-          {ts.hf_accounts.map((a) => (
-            <AgentChip
-              key={a}
-              id={a}
-              color={agentColors[a]}
-              role="HF"
-              hidden={hiddenAgents.has(a)}
-              onClick={() =>
-                setHiddenAgents((s) => {
-                  const next = new Set(s);
-                  if (next.has(a)) next.delete(a);
-                  else next.add(a);
-                  return next;
-                })
-              }
-            />
-          ))}
-        </div>
-      </Card>
+          </>
+        )}
+      </div>
     </div>
   );
 }
