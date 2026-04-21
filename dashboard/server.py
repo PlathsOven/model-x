@@ -747,7 +747,7 @@ def episode(market_id: Optional[str] = Query(None)):
         ms.phase_states[-1].created_at if ms.phase_states else 0.0
     )
     pending_mm = ms.market.pending_mm if ms.market is not None else 1
-    phase_duration_seconds = _derive_phase_duration(ms.phase_states)
+    phase_duration_seconds = _phase_duration_seconds()
 
     return {
         "contract": {
@@ -776,21 +776,54 @@ def episode(market_id: Optional[str] = Query(None)):
     }
 
 
-def _derive_phase_duration(phase_states: List[PhaseState]) -> Optional[float]:
-    """Median of consecutive phase-timestamp deltas, or None if < 2 phases.
+_yaml_cache: Dict[str, Tuple[float, Optional[float]]] = {}
 
-    The supervisor fires on wall-clock multiples of `phase_duration_seconds`,
-    so consecutive phases land one period apart. Taking the median protects
-    against one-off gaps (e.g. resume after Ctrl-C).
+
+def _phase_duration_seconds() -> Optional[float]:
+    """Return the configured phase duration in seconds, or None.
+
+    Read directly from config — this is a setting, not something to derive.
+      1. `PHASE_DURATION_SECONDS` env var (same var `run_live.py` reads).
+      2. Top-level `phase_duration_seconds` in `$CONTRACT_YAML` (mtime-cached).
     """
-    if len(phase_states) < 2:
+    env_val = os.environ.get("PHASE_DURATION_SECONDS")
+    if env_val:
+        try:
+            v = float(env_val)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _phase_duration_from_yaml(os.environ.get("CONTRACT_YAML"))
+
+
+def _phase_duration_from_yaml(path: Optional[str]) -> Optional[float]:
+    """Read `phase_duration_seconds` from a contracts YAML; cache by mtime."""
+    if not path or not os.path.exists(path):
         return None
-    diffs = sorted(
-        phase_states[i + 1].created_at - phase_states[i].created_at
-        for i in range(len(phase_states) - 1)
-    )
-    mid = diffs[len(diffs) // 2]
-    return round(mid, 3) if mid > 0 else None
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None
+    cached = _yaml_cache.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        import yaml  # type: ignore
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except Exception:
+        _yaml_cache[path] = (mtime, None)
+        return None
+    val = data.get("phase_duration_seconds") if isinstance(data, dict) else None
+    try:
+        out: Optional[float] = float(val) if val is not None else None
+        if out is not None and out <= 0:
+            out = None
+    except (TypeError, ValueError):
+        out = None
+    _yaml_cache[path] = (mtime, out)
+    return out
 
 
 @app.get("/api/phases")
