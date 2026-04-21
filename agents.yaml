@@ -3,6 +3,11 @@
 #
 # Each model value is an OpenRouter model id routed through OpenRouterAgent.
 # (requires OPENROUTER_API_KEY in your environment).
+#
+# Optional `max_tokens:` per agent overrides the output-token budget. Default
+# is OpenRouterAgent.DEFAULT_MAX_TOKENS (4096). Reasoning models
+# (nemotron-nano, glm-air, deepseek-r1, …) need this raised so they don't
+# exhaust the budget on thinking tokens and return content=null.
 
 agents:
   # - name: step-3.5-flash-mm
@@ -24,15 +29,19 @@ agents:
   - name: nemotron-3-nano-30b-a3b-mm
     model: nvidia/nemotron-3-nano-30b-a3b:free
     role: MM
+    max_tokens: 8192
 
   - name: nemotron-3-nano-30b-a3b-hf
     model: nvidia/nemotron-3-nano-30b-a3b:free
     role: HF
+    max_tokens: 8192
 
   - name: glm-4.5-air-mm
     model: z-ai/glm-4.5-air:free
     role: MM
+    max_tokens: 8192
 
   - name: glm-4.5-air-hf
     model: z-ai/glm-4.5-air:free
     role: HF
+    max_tokens: 8192

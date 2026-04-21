@@ -133,6 +133,44 @@ def parse_response(text: str) -> Dict[str, Any]:
     return json.loads(strip_json(text))
 
 
+def extract_content(data: Dict[str, Any], model: str) -> str:
+    """Pull the assistant text out of an OpenRouter chat-completions response.
+
+    Raises ValueError with a diagnostic message when the provider returned a
+    null or empty ``content`` field — typically a reasoning-model response
+    whose entire output budget went to reasoning tokens and hit the token
+    limit before any visible text was emitted. The error message includes
+    ``finish_reason`` and whether a ``reasoning`` field was populated so the
+    operator knows to raise ``max_tokens`` (or switch models) rather than
+    chasing a cryptic AttributeError downstream.
+    """
+    if "choices" not in data or not data["choices"]:
+        raise ValueError(
+            f"OpenRouter response missing 'choices' for model {model}. "
+            f"Response: {json.dumps(data)[:500]}"
+        )
+    choice = data["choices"][0]
+    message = choice.get("message") or {}
+    content = message.get("content")
+    if content is None or (isinstance(content, str) and content.strip() == ""):
+        finish_reason = choice.get("finish_reason", "?")
+        reasoning = message.get("reasoning") or message.get("reasoning_content")
+        reasoning_len = len(reasoning) if isinstance(reasoning, str) else 0
+        hint = ""
+        if finish_reason == "length":
+            hint = (
+                " — response hit max_tokens before emitting any content "
+                "(likely a reasoning model that spent its entire budget on "
+                "reasoning tokens; raise max_tokens for this model)"
+            )
+        raise ValueError(
+            f"OpenRouter returned empty content for model {model} "
+            f"(finish_reason={finish_reason!r}, reasoning_chars={reasoning_len})"
+            f"{hint}"
+        )
+    return content
+
+
 # ---------- Agent ----------
 
 class OpenRouterAgent(Agent):
@@ -142,12 +180,19 @@ class OpenRouterAgent(Agent):
     real `httpx.post` is only invoked when `client is None`.
     """
 
+    # Default output-token budget. Chosen to accommodate reasoning models
+    # (nemotron-nano, glm-air, deepseek-r1, ...) which burn thousands of
+    # tokens on thinking before emitting visible content. Non-reasoning
+    # models are unaffected — they emit short JSON and stop early.
+    DEFAULT_MAX_TOKENS = 4096
+
     def __init__(
         self,
         model: str,
         api_key: Optional[str] = None,
         timeout: Optional[float] = None,
         client: Optional[Any] = None,
+        max_tokens: Optional[int] = None,
     ):
         self.model = model
         self._explicit_api_key = api_key
@@ -158,6 +203,12 @@ class OpenRouterAgent(Agent):
             self.timeout = timeout
         else:
             self.timeout = float(os.environ.get("OPENROUTER_TIMEOUT", "60"))
+        if max_tokens is not None:
+            self.max_tokens = int(max_tokens)
+        else:
+            self.max_tokens = int(
+                os.environ.get("OPENROUTER_MAX_TOKENS", self.DEFAULT_MAX_TOKENS)
+            )
         self._client = client
         # Per-call trace log: each entry has phase / cycle / request / response
         # / parsed JSON / decision (or error). Caller dumps this to disk after
@@ -179,7 +230,7 @@ class OpenRouterAgent(Agent):
             },
             "json": {
                 "model": self.model,
-                "max_tokens": 1024,
+                "max_tokens": self.max_tokens,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "Submit your decision now."},
@@ -231,14 +282,14 @@ class OpenRouterAgent(Agent):
             self._log_http_error(resp, args)
             resp.raise_for_status()
             data = resp.json()
-            if "choices" not in data:
-                log.error("OpenRouter response missing 'choices' for model=%s: %s",
-                          self.model, json.dumps(data)[:2000])
-                raise ValueError(
-                    f"OpenRouter response missing 'choices' for model {self.model}. "
-                    f"Response: {json.dumps(data)[:500]}"
+            try:
+                return extract_content(data, self.model)
+            except ValueError:
+                log.error(
+                    "OpenRouter bad response for model=%s: %s",
+                    self.model, json.dumps(data)[:2000],
                 )
-            return data["choices"][0]["message"]["content"]
+                raise
 
     async def _call_async(self, system_prompt: str) -> str:
         """Async variant — opens a per-call AsyncClient so the live scheduler
@@ -272,14 +323,14 @@ class OpenRouterAgent(Agent):
             self._log_http_error(resp, args)
             resp.raise_for_status()
             data = resp.json()
-            if "choices" not in data:
-                log.error("OpenRouter response missing 'choices' for model=%s: %s",
-                          self.model, json.dumps(data)[:2000])
-                raise ValueError(
-                    f"OpenRouter response missing 'choices' for model {self.model}. "
-                    f"Response: {json.dumps(data)[:500]}"
+            try:
+                return extract_content(data, self.model)
+            except ValueError:
+                log.error(
+                    "OpenRouter bad response for model=%s: %s",
+                    self.model, json.dumps(data)[:2000],
                 )
-            return data["choices"][0]["message"]["content"]
+                raise
 
     # ---- Agent interface ----
 

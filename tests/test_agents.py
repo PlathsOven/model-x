@@ -16,6 +16,7 @@ import modelx.agents.openrouter as openrouter_mod
 from modelx.agents.openrouter import (
     OpenRouterAgent,
     OpenRouterKeyPool,
+    extract_content,
     get_key_pool,
     parse_response,
     strip_json,
@@ -338,6 +339,115 @@ def test_429_all_keys_exhausted():
     _reset_key_pool()
 
 
+def test_extract_content_happy_path():
+    data = {"choices": [{"message": {"content": '{"bid_price": 1}'}, "finish_reason": "stop"}]}
+    assert extract_content(data, "test/model") == '{"bid_price": 1}'
+
+
+def test_extract_content_null_content_raises_with_diagnostics():
+    """Reasoning models that burn max_tokens on thinking return content=null —
+    error message must call that out clearly rather than surfacing as an
+    AttributeError downstream."""
+    data = {
+        "choices": [{
+            "message": {"content": None, "reasoning": "thought for a while..."},
+            "finish_reason": "length",
+        }],
+    }
+    try:
+        extract_content(data, "nvidia/nemotron-3-nano-30b-a3b:free")
+    except ValueError as e:
+        msg = str(e)
+        assert "empty content" in msg
+        assert "nvidia/nemotron-3-nano-30b-a3b:free" in msg
+        assert "finish_reason='length'" in msg
+        assert "max_tokens" in msg  # actionable hint present
+        return
+    raise AssertionError("expected ValueError on null content")
+
+
+def test_extract_content_empty_string_also_raises():
+    data = {"choices": [{"message": {"content": "   "}, "finish_reason": "stop"}]}
+    try:
+        extract_content(data, "test/model")
+    except ValueError as e:
+        assert "empty content" in str(e)
+        return
+    raise AssertionError("expected ValueError on blank content")
+
+
+def test_extract_content_missing_choices_raises():
+    try:
+        extract_content({}, "test/model")
+    except ValueError as e:
+        assert "missing 'choices'" in str(e)
+        return
+    raise AssertionError("expected ValueError when choices missing")
+
+
+def test_agent_null_content_error_recorded_and_raised():
+    """End-to-end: an agent receiving content=None should raise, record an
+    error trace, and the error should mention max_tokens."""
+    _reset_key_pool()
+    openrouter_mod._key_pool = OpenRouterKeyPool(["key-1"])
+
+    class NullContentClient:
+        def post(self, url, **kwargs):
+            return FakeResp({
+                "choices": [{
+                    "message": {"content": None, "reasoning": "..."},
+                    "finish_reason": "length",
+                }],
+            })
+
+    agent = OpenRouterAgent(model="nvidia/nemotron-3-nano-30b-a3b:free", client=NullContentClient())
+    raised = False
+    try:
+        agent.get_quote(_ctx())
+    except ValueError as e:
+        raised = True
+        assert "empty content" in str(e)
+        assert "max_tokens" in str(e)
+    assert raised
+    # Error trace must be captured so downstream tooling can debug.
+    assert len(agent.traces) == 1
+    trace = agent.traces[0]
+    assert trace["error"] is not None
+    assert "ValueError" in trace["error"]
+    assert trace["raw_response"] is None
+    _reset_key_pool()
+
+
+def test_max_tokens_default():
+    fake = FakeClient('{"bid_price": 1, "ask_price": 2, "bid_size": 1, "ask_size": 1}')
+    agent = OpenRouterAgent(model="test/model", client=fake)
+    agent.get_quote(_ctx())
+    assert fake.last_request["body"]["max_tokens"] == OpenRouterAgent.DEFAULT_MAX_TOKENS
+
+
+def test_max_tokens_explicit_override():
+    fake = FakeClient('{"bid_price": 1, "ask_price": 2, "bid_size": 1, "ask_size": 1}')
+    agent = OpenRouterAgent(model="test/model", client=fake, max_tokens=16384)
+    agent.get_quote(_ctx())
+    assert fake.last_request["body"]["max_tokens"] == 16384
+
+
+def test_max_tokens_env_override(monkeypatch_env=None):
+    """OPENROUTER_MAX_TOKENS env var sets the default when no explicit value."""
+    old = os.environ.get("OPENROUTER_MAX_TOKENS")
+    os.environ["OPENROUTER_MAX_TOKENS"] = "2048"
+    try:
+        fake = FakeClient('{"bid_price": 1, "ask_price": 2, "bid_size": 1, "ask_size": 1}')
+        agent = OpenRouterAgent(model="test/model", client=fake)
+        agent.get_quote(_ctx())
+        assert fake.last_request["body"]["max_tokens"] == 2048
+    finally:
+        if old is None:
+            del os.environ["OPENROUTER_MAX_TOKENS"]
+        else:
+            os.environ["OPENROUTER_MAX_TOKENS"] = old
+
+
 def test_explicit_api_key_no_rotation():
     """When api_key is passed directly, 429 is not retried."""
     _reset_key_pool()
@@ -378,6 +488,14 @@ TESTS = [
     test_key_pool_rotation,
     test_429_rotates_key_and_retries,
     test_429_all_keys_exhausted,
+    test_extract_content_happy_path,
+    test_extract_content_null_content_raises_with_diagnostics,
+    test_extract_content_empty_string_also_raises,
+    test_extract_content_missing_choices_raises,
+    test_agent_null_content_error_recorded_and_raised,
+    test_max_tokens_default,
+    test_max_tokens_explicit_override,
+    test_max_tokens_env_override,
     test_explicit_api_key_no_rotation,
 ]
 

@@ -348,7 +348,11 @@ export default function App() {
               />
             )}
             {activeTab === "reasoning" && (
-              <ReasoningTraces episode={episode} dataVersion={dataVersion} />
+              <ReasoningTraces
+                episode={episode}
+                dataVersion={dataVersion}
+                marketId={marketId}
+              />
             )}
             {activeTab === "trades" && (
               <TradesView

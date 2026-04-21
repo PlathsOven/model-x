@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""ModelX live news runner — same architecture as run_markets.py, but with
-real-time headlines and price data instead of a hardcoded info_schedule.
+"""ModelX live runner — drives N contracts concurrently on a real-time
+wall-clock schedule with live headlines and price data.
 
-Reads a single contract definition from `contracts.yaml` (including search
-terms, price ticker, and news sources) and agent configuration from
-`agents.yaml`. Uses the same MarketSupervisor wall-clock loop as
-`run_markets.py` — every `phase_duration_seconds`, one phase (MM or HF)
-fires, LLM calls fan out concurrently, and state persists to SQLite.
+Reads contract definitions from `contracts.yaml` (a list of contracts, each
+with search terms, price ticker, news sources, and settlement date) and
+agent configuration from `agents.yaml`. All agents participate in every
+contract. Every `phase_duration_seconds`, one phase (MM or HF) fires, LLM
+calls fan out concurrently, and state persists to SQLite.
 
 Settle with `settle.py` when you know the real-world value.
 
@@ -54,31 +54,18 @@ def _load_yaml(path: str) -> Dict[str, Any]:
 # ---------- config loading ----------
 
 def load_contract_config(path: str) -> tuple:
-    """Parse contracts.yaml into (MarketConfig, phase_duration_seconds, news_sources, max_headlines)."""
+    """Parse contracts.yaml into (List[MarketConfig], phase_duration_seconds)."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"contract config not found at {path}")
 
     data = _load_yaml(path)
 
-    # Contract section.
-    cdata = data.get("contract")
-    if not cdata or not isinstance(cdata, dict):
-        raise ValueError(f"{path}: missing 'contract:' section")
-    for key in ("id", "name", "description"):
-        if key not in cdata:
-            raise ValueError(f"{path}: contract missing required key {key!r}")
+    # Contracts list.
+    contracts_raw = data.get("contracts")
+    if not contracts_raw or not isinstance(contracts_raw, list):
+        raise ValueError(f"{path}: missing or empty 'contracts:' list")
 
-    search_terms = cdata.get("search_terms", [])
-    if isinstance(search_terms, str):
-        search_terms = [search_terms]
-
-    # News section.
-    ndata = data.get("news", {})
-    raw_sources = ndata.get("sources", [])
-    if isinstance(raw_sources, str):
-        raw_sources = [raw_sources]
-
-    # Phase duration.
+    # Phase duration (global, shared across all contracts).
     phase = data.get("phase_duration_seconds")
     if phase is None:
         phase = os.environ.get("PHASE_DURATION_SECONDS")
@@ -91,33 +78,59 @@ def load_contract_config(path: str) -> tuple:
     if phase_seconds <= 0:
         raise ValueError(f"{path}: phase_duration_seconds must be > 0")
 
-    settlement_date_str = str(data.get("settlement_date", "TBD"))
-    settlement_dt = parse_settlement_date(settlement_date_str)
-    if settlement_dt is None:
-        raise ValueError(
-            f"{path}: settlement_date must be a parseable timestamp "
-            f"(e.g. '2026-04-10 16:00:00T-04:00'), got {settlement_date_str!r}"
-        )
+    market_configs: List[MarketConfig] = []
+    seen_ids: set = set()
 
-    market_config = MarketConfig(
-        id=str(cdata["id"]),
-        name=str(cdata["name"]),
-        description=str(cdata["description"]),
-        settlement_date=settlement_date_str,
-        multiplier=float(cdata.get("multiplier", 1.0)),
-        position_limit=int(cdata.get("position_limit", 100)),
-        max_size=int(data.get("max_size", 50)),
-        settlement_datetime=settlement_dt,
-        search_terms=[str(s) for s in search_terms],
-        price_ticker=str(cdata["price_ticker"]) if cdata.get("price_ticker") else None,
-        news_sources=[str(s) for s in raw_sources],
-        max_headlines_per_cycle=int(ndata.get(
-            "max_headlines_per_cycle",
-            os.environ.get("MAX_HEADLINES_PER_CYCLE", "10"),
-        )),
-    )
+    for i, cdata in enumerate(contracts_raw):
+        if not isinstance(cdata, dict):
+            raise ValueError(f"{path}: contracts[{i}] must be a mapping")
+        for key in ("id", "name", "description", "settlement_date"):
+            if key not in cdata:
+                raise ValueError(f"{path}: contracts[{i}] missing required key {key!r}")
 
-    return market_config, phase_seconds
+        market_id = str(cdata["id"])
+        if market_id in seen_ids:
+            raise ValueError(f"{path}: duplicate contract id {market_id!r}")
+        seen_ids.add(market_id)
+
+        search_terms = cdata.get("search_terms", [])
+        if isinstance(search_terms, str):
+            search_terms = [search_terms]
+
+        raw_sources = cdata.get("news_sources", [])
+        if isinstance(raw_sources, str):
+            raw_sources = [raw_sources]
+
+        settlement_date_str = str(cdata["settlement_date"])
+        settlement_dt = parse_settlement_date(settlement_date_str)
+        if settlement_dt is None:
+            raise ValueError(
+                f"{path}: contracts[{i}] ({market_id}) settlement_date must be "
+                f"a parseable timestamp, got {settlement_date_str!r}"
+            )
+
+        market_configs.append(MarketConfig(
+            id=market_id,
+            name=str(cdata["name"]),
+            description=str(cdata["description"]),
+            settlement_date=settlement_date_str,
+            multiplier=float(cdata.get("multiplier", 1.0)),
+            position_limit=int(cdata.get("position_limit", 100)),
+            max_size=int(cdata.get("max_size", 50)),
+            settlement_datetime=settlement_dt,
+            search_terms=[str(s) for s in search_terms],
+            price_ticker=str(cdata["price_ticker"]) if cdata.get("price_ticker") else None,
+            news_sources=[str(s) for s in raw_sources],
+            max_headlines_per_cycle=int(cdata.get(
+                "max_headlines_per_cycle",
+                os.environ.get("MAX_HEADLINES_PER_CYCLE", "10"),
+            )),
+        ))
+
+    if not market_configs:
+        raise ValueError(f"{path}: no contracts defined under 'contracts:' key")
+
+    return market_configs, phase_seconds
 
 
 def load_agent_specs(path: str) -> List[AgentSpec]:
@@ -144,10 +157,27 @@ def load_agent_specs(path: str) -> List[AgentSpec]:
                 f"{path}: agent {item['name']!r} uses model='human' which is "
                 f"incompatible with live mode (would block the event loop)."
             )
+        max_tokens_raw = item.get("max_tokens")
+        if max_tokens_raw is not None:
+            try:
+                max_tokens_val = int(max_tokens_raw)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{path}: agent {item['name']!r} max_tokens must be an "
+                    f"integer, got {max_tokens_raw!r}"
+                )
+            if max_tokens_val <= 0:
+                raise ValueError(
+                    f"{path}: agent {item['name']!r} max_tokens must be > 0, "
+                    f"got {max_tokens_val}"
+                )
+        else:
+            max_tokens_val = None
         specs.append(AgentSpec(
             name=str(item["name"]),
             model=str(item["model"]),
             role=role,
+            max_tokens=max_tokens_val,
         ))
     return specs
 
@@ -155,13 +185,13 @@ def load_agent_specs(path: str) -> List[AgentSpec]:
 # ---------- agent factory ----------
 
 def build_agent(spec: AgentSpec) -> Agent:
-    return OpenRouterAgent(model=spec.model)
+    return OpenRouterAgent(model=spec.model, max_tokens=spec.max_tokens)
 
 
 # ---------- main ----------
 
 async def _run(args: Any) -> None:
-    market_config, phase_seconds = load_contract_config(args.contract)
+    market_configs, phase_seconds = load_contract_config(args.contract)
     agent_specs = load_agent_specs(args.agents)
 
     from modelx.agents.openrouter import get_key_pool
@@ -174,7 +204,7 @@ async def _run(args: Any) -> None:
 
     config = GlobalConfig(
         phase_duration_seconds=phase_seconds,
-        markets=[market_config],
+        markets=market_configs,
         agent_specs=agent_specs,
     )
 
@@ -187,22 +217,21 @@ async def _run(args: Any) -> None:
     supervisor.setup()
 
     print(
-        f"[run_live] market={market_config.id!r}, "
+        f"[run_live] {len(market_configs)} contract(s), "
         f"{len(agent_specs)} agent(s), "
         f"phase_duration={phase_seconds}s, "
-        f"settlement={market_config.settlement_date}, "
         f"db={args.db}",
         flush=True,
     )
-    print(
-        f"[run_live] search_terms={market_config.search_terms}, "
-        f"price_ticker={market_config.price_ticker}",
-        flush=True,
-    )
-    print(
-        f"[run_live] news_sources={market_config.news_sources}",
-        flush=True,
-    )
+    for mc in market_configs:
+        print(
+            f"[run_live]   market={mc.id!r}, "
+            f"settlement={mc.settlement_date}, "
+            f"search_terms={mc.search_terms}, "
+            f"price_ticker={mc.price_ticker}, "
+            f"news_sources={mc.news_sources}",
+            flush=True,
+        )
     print(flush=True)
 
     try:
@@ -210,12 +239,12 @@ async def _run(args: Any) -> None:
     except KeyboardInterrupt:
         print("\n[run_live] interrupted by user — state persisted to db")
 
-    print(
-        f"\n[run_live] market entered PENDING_SETTLEMENT. "
-        f"Settle with:\n"
-        f"  python3 settle.py --market {market_config.id} --value <float> --db {args.db}",
-        flush=True,
-    )
+    print("\n[run_live] all markets entered PENDING_SETTLEMENT. Settle with:")
+    for mc in market_configs:
+        print(
+            f"  python3 settle.py --market {mc.id} --value <float> --db {args.db}",
+            flush=True,
+        )
 
 
 def main() -> None:

@@ -77,10 +77,11 @@ export const api = {
     getJson<Orderbook>(
       withMarket(`/api/orderbook/${encodeURIComponent(phaseId)}`, marketId)
     ),
-  traces: () => getJson<AllTraces>("/api/traces"),
-  agentTraces: (agent: string) =>
+  traces: (marketId?: string | null) =>
+    getJson<AllTraces>(withMarket("/api/traces", marketId)),
+  agentTraces: (agent: string, marketId?: string | null) =>
     getJson<AgentTraces & { account_id: string }>(
-      `/api/traces/${encodeURIComponent(agent)}`
+      withMarket(`/api/traces/${encodeURIComponent(agent)}`, marketId)
     ),
   metrics: (marketId?: string | null) =>
     getJson<Metrics>(withMarket("/api/metrics", marketId)),

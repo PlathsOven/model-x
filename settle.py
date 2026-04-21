@@ -40,7 +40,7 @@ def main() -> None:
     parser.add_argument("--db", default="modelx.db", help="SQLite db path")
     parser.add_argument(
         "--market", required=True,
-        help="market id from markets.yaml (e.g. cpi-yoy-may-2025)",
+        help="market id from contracts.yaml (e.g. cpi-yoy-may-2025)",
     )
     parser.add_argument(
         "--value", type=float, required=True,

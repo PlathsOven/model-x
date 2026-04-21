@@ -41,6 +41,7 @@ from modelx.db import (
     list_accounts,
     list_accounts_for_market,
     list_phase_states,
+    list_phase_traces_by_contract,
     list_fills_by_contract,
     list_markets,
     positions_before_phase,
@@ -86,6 +87,11 @@ class MarketAppState:
     positions: Dict[str, int] = field(default_factory=dict)
     marks: List[float] = field(default_factory=list)
     residual_books: Dict[str, List[BookLevel]] = field(default_factory=dict)
+    # Reasoning traces grouped by agent, rehydrated from phase_traces.
+    # {account_id: [trace_dict, ...]}, ordered chronologically (MM before
+    # HF within a tick). Empty dict when the market has no persisted
+    # traces yet (common during the first phase of a fresh run).
+    traces_by_agent: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -181,6 +187,14 @@ def _load_market(
     positions = positions_for_contract(conn, contract.id)
     marks = _carry_mark_forward(phases) if phases else []
 
+    # Load reasoning traces for this contract and group by agent.
+    trace_rows = list_phase_traces_by_contract(conn, contract.id)
+    traces_by_agent: Dict[str, List[Dict[str, Any]]] = {}
+    for row in trace_rows:
+        traces_by_agent.setdefault(row["account_id"], []).append(
+            _trace_row_to_dict(row),
+        )
+
     # For every MM phase, derive the residual book the HFs saw — always
     # recompute, never trust load_phase's conditional population.
     residual_books: Dict[str, List[BookLevel]] = {}
@@ -205,6 +219,7 @@ def _load_market(
         positions=positions,
         marks=marks,
         residual_books=residual_books,
+        traces_by_agent=traces_by_agent,
     )
 
 
@@ -380,6 +395,30 @@ def _book_level_dict(bl: BookLevel) -> dict:
         "side": bl.side,
         "price": bl.price,
         "size": bl.size,
+    }
+
+
+def _trace_row_to_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape a phase_traces row for the frontend TraceEntry schema.
+
+    `row` comes from `list_phase_traces_by_contract`, which has already
+    decoded the parsed/decision JSON blobs. Produces the same keys the
+    legacy `episode_traces.json` format used so the dashboard's
+    ReasoningTraces and ContextView components work unchanged.
+    """
+    phase_type = row.get("phase_type") or "MM"
+    return {
+        "phase": phase_type,         # legacy alias, always equal to phase_type
+        "phase_id": row["phase_id"],
+        "phase_type": phase_type,
+        "timestamp": row.get("phase_ts") or row.get("created_at") or 0.0,
+        "account_id": row["account_id"],
+        "model": row.get("model") or "",
+        "request": row.get("request") or "",
+        "raw_response": row.get("raw_response"),
+        "parsed": row.get("parsed"),
+        "decision": row.get("decision"),
+        "error": row.get("error"),
     }
 
 
@@ -892,29 +931,93 @@ def orderbook(phase_id: str, market_id: Optional[str] = Query(None)):
     }
 
 
-@app.get("/api/traces")
-def traces():
-    state = _state()
-    if state.traces is None:
-        return {"loaded": False, "contract": None, "agents": {}, "info_schedule": {}}
+def _build_traces_from_market(ms: MarketAppState) -> Dict[str, Any]:
+    """Shape the /api/traces payload from a market's phase_traces rows.
+
+    Returns the schema the ReasoningTraces frontend expects:
+    `{loaded, contract, agents: {id: {model, role, traces: [...]}}}`.
+    Role/model are pulled from the accounts table so agents show up
+    even before they've emitted their first trace; model on trace rows
+    takes precedence so a mid-run model swap is reflected.
+    """
+    accounts_map = {a.id: a for a in ms.accounts}
+    agents: Dict[str, Any] = {}
+    for acct in ms.accounts:
+        agents[acct.id] = {
+            "model": acct.model,
+            "role": acct.role,
+            "traces": [],
+        }
+    for aid, trace_list in ms.traces_by_agent.items():
+        acct = accounts_map.get(aid)
+        first_model = next(
+            (t["model"] for t in trace_list if t.get("model")),
+            (acct.model if acct else ""),
+        )
+        agents[aid] = {
+            "model": first_model,
+            "role": acct.role if acct else (
+                trace_list[0].get("phase_type") if trace_list else "MM"
+            ),
+            "traces": trace_list,
+        }
+
+    contract_payload: Optional[Dict[str, Any]] = None
+    if ms.contract is not None:
+        contract_payload = {
+            "id": ms.contract.id,
+            "name": ms.contract.name,
+            "description": ms.contract.description,
+            "multiplier": ms.contract.multiplier,
+            "position_limit": ms.contract.position_limit,
+            "settlement_value": ms.contract.settlement_value,
+            "settlement_date": (
+                ms.market.settlement_date if ms.market is not None else None
+            ),
+        }
+
     return {
         "loaded": True,
-        **state.traces,
+        "contract": contract_payload,
+        "agents": agents,
+        "info_schedule": {},
     }
+
+
+@app.get("/api/traces")
+def traces(market_id: Optional[str] = Query(None)):
+    state = _state()
+    ms = _select_market(state, market_id)
+    if ms is not None and ms.contract is not None:
+        return _build_traces_from_market(ms)
+    # Legacy fallback: demo dbs with no phase_traces but a companion
+    # episode_traces.json file next to the db.
+    if state.traces is None:
+        return {"loaded": False, "contract": None, "agents": {}, "info_schedule": {}}
+    return {"loaded": True, **state.traces}
 
 
 @app.get("/api/traces/{agent_id}")
-def traces_for_agent(agent_id: str):
+def traces_for_agent(agent_id: str, market_id: Optional[str] = Query(None)):
     state = _state()
+    ms = _select_market(state, market_id)
+    if ms is not None and ms.contract is not None:
+        payload = _build_traces_from_market(ms)
+        agents = payload.get("agents", {}) or {}
+        if agent_id not in agents:
+            raise HTTPException(
+                status_code=404, detail=f"no traces for agent {agent_id!r}",
+            )
+        return {"account_id": agent_id, **agents[agent_id]}
+    # Legacy fallback.
     if state.traces is None:
         raise HTTPException(status_code=404, detail="traces not loaded")
-    agents = state.traces.get("agents", {}) or {}
-    if agent_id not in agents:
-        raise HTTPException(status_code=404, detail=f"no traces for agent {agent_id!r}")
-    return {
-        "account_id": agent_id,
-        **agents[agent_id],
-    }
+    legacy_agents = state.traces.get("agents", {}) or {}
+    if agent_id not in legacy_agents:
+        raise HTTPException(
+            status_code=404, detail=f"no traces for agent {agent_id!r}",
+        )
+    return {"account_id": agent_id, **legacy_agents[agent_id]}
 
 
 @app.get("/api/metrics")

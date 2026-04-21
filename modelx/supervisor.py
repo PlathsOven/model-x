@@ -7,7 +7,7 @@ then calls `MarketRunner.step()` for every active market in parallel via
 `asyncio.gather`.
 
 This guarantees that all markets advance their phases on the same tick.
-A new market added to `markets.yaml` between ticks joins on the next one.
+A new contract added to `contracts.yaml` between ticks joins on the next one.
 A settled market is skipped automatically (its `is_active()` returns False).
 
 Concurrency model:

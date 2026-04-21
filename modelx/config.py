@@ -1,11 +1,8 @@
-"""Config loader for live multi-market runs.
+"""Config dataclasses and utilities for live market runs.
 
-Parses `markets.yaml` (market definitions + global phase duration) and
-`agents.yaml` (agent registry) into typed `GlobalConfig` / `MarketConfig` /
-`AgentSpec` dataclasses for `run_markets.py` and `MarketSupervisor`.
-
-PyYAML is preferred but optional — there's a tiny fallback parser for the
-documented format so the rest of the package keeps working without the dep.
+Provides `GlobalConfig`, `MarketConfig`, and `AgentSpec` dataclasses used by
+`run_live.py` and `MarketSupervisor`, plus a YAML loader with a mini-parser
+fallback so the package works without PyYAML.
 """
 
 import os
@@ -50,6 +47,12 @@ class AgentSpec:
     name: str
     model: str
     role: str  # "MM" or "HF"
+    # Optional per-agent output-token budget. When None, OpenRouterAgent
+    # falls back to OPENROUTER_MAX_TOKENS env or its default. Reasoning
+    # models (nemotron-nano, glm-air, deepseek-r1, …) typically need this
+    # raised so they don't burn the whole budget on reasoning tokens and
+    # return content=null.
+    max_tokens: Optional[int] = None
 
 
 @dataclass
@@ -78,171 +81,6 @@ class GlobalConfig:
     markets: List[MarketConfig]
     agent_specs: List[AgentSpec]
 
-
-# ---------- public API ----------
-
-def load_config(markets_path: str, agents_path: str) -> GlobalConfig:
-    """Load and validate the full live-run config.
-
-    `markets_path` is a YAML file with `phase_duration_seconds` and `markets:`.
-    `agents_path` is the existing agents.yaml — every agent in it participates
-    in every market. Raises ValueError on missing/invalid fields.
-    """
-    if not os.path.exists(markets_path):
-        raise FileNotFoundError(f"markets config not found at {markets_path}")
-    if not os.path.exists(agents_path):
-        raise FileNotFoundError(f"agents config not found at {agents_path}")
-
-    markets_data = _load_yaml(markets_path)
-    agents_data = _load_yaml(agents_path)
-
-    phase = markets_data.get("phase_duration_seconds")
-    if phase is None:
-        phase = os.environ.get("PHASE_DURATION_SECONDS")
-    if phase is None:
-        raise ValueError(
-            f"{markets_path}: missing top-level 'phase_duration_seconds' "
-            f"(and PHASE_DURATION_SECONDS env var is not set)"
-        )
-    try:
-        phase_seconds = float(phase)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"{markets_path}: phase_duration_seconds must be a number, got {phase!r}"
-        )
-    if phase_seconds <= 0:
-        raise ValueError(
-            f"{markets_path}: phase_duration_seconds must be > 0, got {phase_seconds}"
-        )
-
-    markets = _parse_markets(markets_data.get("markets") or [], markets_path)
-    if not markets:
-        raise ValueError(f"{markets_path}: no markets defined under 'markets:' key")
-
-    agent_specs = _parse_agents(agents_data.get("agents") or [], agents_path)
-    if not agent_specs:
-        raise ValueError(f"{agents_path}: no agents defined under 'agents:' key")
-    # Live markets cannot use the blocking HumanAgent — it would freeze the
-    # asyncio event loop forever.
-    for spec in agent_specs:
-        if spec.model == "human":
-            raise ValueError(
-                f"{agents_path}: agent {spec.name!r} uses model='human' which is "
-                f"incompatible with live multi-market runs (would block the event loop)."
-            )
-
-    return GlobalConfig(
-        phase_duration_seconds=phase_seconds,
-        markets=markets,
-        agent_specs=agent_specs,
-    )
-
-
-# ---------- parsing helpers ----------
-
-def _parse_markets(raw: Any, path: str) -> List[MarketConfig]:
-    if not isinstance(raw, list):
-        raise ValueError(f"{path}: 'markets:' must be a list")
-    out: List[MarketConfig] = []
-    seen_ids: set = set()
-    for i, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ValueError(f"{path}: markets[{i}] must be a mapping")
-        for key in ("id", "name", "description", "settlement_date"):
-            if key not in item:
-                raise ValueError(
-                    f"{path}: markets[{i}] missing required key {key!r}"
-                )
-        market_id = str(item["id"])
-        if market_id in seen_ids:
-            raise ValueError(f"{path}: duplicate market id {market_id!r}")
-        seen_ids.add(market_id)
-
-        info_schedule = _parse_info_schedule(
-            item.get("info_schedule") or {}, path, market_id,
-        )
-
-        # Live news fields (optional).
-        raw_terms = item.get("search_terms") or []
-        if isinstance(raw_terms, str):
-            raw_terms = [raw_terms]
-        raw_sources = item.get("news_sources") or []
-        if isinstance(raw_sources, str):
-            raw_sources = [raw_sources]
-
-        settlement_date_str = str(item["settlement_date"])
-        out.append(MarketConfig(
-            id=market_id,
-            name=str(item["name"]),
-            description=str(item["description"]),
-            settlement_date=settlement_date_str,
-            multiplier=float(item.get("multiplier", 1.0)),
-            position_limit=int(item.get("position_limit", 100)),
-            max_size=int(item.get("max_size", 50)),
-            settlement_datetime=parse_settlement_date(settlement_date_str),
-            info_schedule=info_schedule,
-            search_terms=[str(s) for s in raw_terms],
-            price_ticker=str(item["price_ticker"]) if item.get("price_ticker") else None,
-            news_sources=[str(s) for s in raw_sources],
-            max_headlines_per_cycle=int(item.get(
-                "max_headlines_per_cycle",
-                os.environ.get("MAX_HEADLINES_PER_CYCLE", "10"),
-            )),
-            news_lookback_phases=int(item.get("news_lookback_phases", 2)),
-        ))
-    return out
-
-
-def _parse_info_schedule(
-    raw: Any,
-    path: str,
-    market_id: str,
-) -> Dict[int, List[str]]:
-    """Normalize the info_schedule mapping. Each value may be a string or list."""
-    if not isinstance(raw, dict):
-        raise ValueError(
-            f"{path}: market {market_id!r} info_schedule must be a mapping"
-        )
-    out: Dict[int, List[str]] = {}
-    for k, v in raw.items():
-        try:
-            cycle_idx = int(k)
-        except (TypeError, ValueError):
-            raise ValueError(
-                f"{path}: market {market_id!r} info_schedule key "
-                f"{k!r} is not an integer"
-            )
-        if isinstance(v, list):
-            out[cycle_idx] = [str(x) for x in v]
-        else:
-            out[cycle_idx] = [str(v)]
-    return out
-
-
-def _parse_agents(raw: Any, path: str) -> List[AgentSpec]:
-    if not isinstance(raw, list):
-        raise ValueError(f"{path}: 'agents:' must be a list")
-    out: List[AgentSpec] = []
-    for i, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ValueError(f"{path}: agents[{i}] must be a mapping")
-        for key in ("name", "model", "role"):
-            if key not in item:
-                raise ValueError(
-                    f"{path}: agents[{i}] missing required key {key!r}"
-                )
-        role = str(item["role"])
-        if role not in ("MM", "HF"):
-            raise ValueError(
-                f"{path}: agent {item['name']!r} has invalid role {role!r} "
-                f"(expected 'MM' or 'HF')"
-            )
-        out.append(AgentSpec(
-            name=str(item["name"]),
-            model=str(item["model"]),
-            role=role,
-        ))
-    return out
 
 
 # ---------- YAML loader (PyYAML preferred, fallback parser otherwise) ----------

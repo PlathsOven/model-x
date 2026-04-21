@@ -31,6 +31,7 @@ from .phase import (
 from .db import (
     delete_future_data,
     delete_market_data,
+    insert_phase_trace,
     list_phase_states,
     list_fills_by_contract,
     positions_for_contract,
@@ -84,6 +85,12 @@ class MarketRunner:
         # Holds the MM phase object between MM and HF steps so the HF
         # phase can read the residual book.
         self._mm_phase: Optional[Phase] = None
+
+        # Per-participant count of traces already flushed to phase_traces.
+        # Starts at 0 on every process boot — the DB uses INSERT OR REPLACE
+        # on (phase_id, account_id) so re-flushing a trace from a re-run
+        # phase just overwrites the previous row rather than erroring.
+        self._trace_flushed: Dict[str, int] = {}
 
         # Live news: track phase timestamps so we can look back N phases
         # for headlines (configurable via news_lookback_phases).
@@ -233,6 +240,7 @@ class MarketRunner:
         if mm_mark > 0:
             self._current_mark = mm_mark
         self._positions.update(self._mm_phase.positions)
+        self._flush_new_traces()
         print(
             f"[{self.market.id}] MM @ {_fmt_ts(tick_time)} closed: "
             f"{len(mm_fills)} fills, mark={mm_mark:.4f}, "
@@ -300,6 +308,7 @@ class MarketRunner:
         if hf_mark > 0:
             self._current_mark = hf_mark
         self._positions.update(hf_phase.positions)
+        self._flush_new_traces()
         print(
             f"[{self.market.id}] HF @ {_fmt_ts(tick_time)} closed: "
             f"{len(hf_fills)} fills, mark={hf_mark:.4f}",
@@ -307,6 +316,34 @@ class MarketRunner:
         )
         # Pair done — clear so the next MM tick opens a fresh one.
         self._mm_phase = None
+
+    # ---------- trace persistence ----------
+
+    def _flush_new_traces(self) -> None:
+        """Write any not-yet-persisted entries from each agent.traces to DB.
+
+        Called after every MM and HF phase closes.  Tracks a per-participant
+        offset so each call is O(new traces), not O(total traces), even
+        though the in-memory list grows linearly over a long run.
+        """
+        for p in self.participants:
+            traces = getattr(p.agent, "traces", None) or []
+            start = self._trace_flushed.get(p.account_id, 0)
+            if start >= len(traces):
+                continue
+            for trace in traces[start:]:
+                try:
+                    insert_phase_trace(
+                        self.db, trace, contract_id=self.contract.id,
+                    )
+                except Exception as e:
+                    print(
+                        f"[{self.market.id}] failed to persist trace for "
+                        f"{p.account_id} phase={trace.get('phase_id')}: "
+                        f"{type(e).__name__}: {e}",
+                        flush=True,
+                    )
+            self._trace_flushed[p.account_id] = len(traces)
 
     # ---------- per-agent calls ----------
 

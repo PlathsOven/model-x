@@ -10,8 +10,9 @@ All functions take a `sqlite3.Connection`; use `connect(path)` to open one.
 Pass `":memory:"` for an ephemeral in-process db (tests, one-off runs).
 """
 
+import json
 import sqlite3
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .models import (
     Account,
@@ -118,11 +119,28 @@ CREATE TABLE IF NOT EXISTS agent_lifetime_stats (
     PRIMARY KEY (account_id, market_id)
 );
 
+CREATE TABLE IF NOT EXISTS phase_traces (
+    phase_id       TEXT NOT NULL,
+    account_id     TEXT NOT NULL,
+    contract_id    TEXT NOT NULL,
+    phase_type     TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    request        TEXT NOT NULL,
+    raw_response   TEXT,
+    parsed_json    TEXT,
+    decision_json  TEXT,
+    error          TEXT,
+    created_at     REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (phase_id, account_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_quotes_phase   ON quotes  (phase_id);
 CREATE INDEX IF NOT EXISTS idx_orders_phase   ON orders  (phase_id);
 CREATE INDEX IF NOT EXISTS idx_fills_phase    ON fills   (phase_id);
 CREATE INDEX IF NOT EXISTS idx_fills_contract ON fills   (contract_id);
 CREATE INDEX IF NOT EXISTS idx_phases_contract ON phase_states (contract_id);
+CREATE INDEX IF NOT EXISTS idx_phase_traces_contract ON phase_traces (contract_id);
+CREATE INDEX IF NOT EXISTS idx_phase_traces_account  ON phase_traces (account_id);
 """
 
 # Indexes that depend on migrated columns. Created after _maybe_migrate so
@@ -508,7 +526,7 @@ def list_orders_by_phase(
 # ---------- fills ----------
 
 def delete_phase_data(conn: sqlite3.Connection, phase_id: str) -> None:
-    """Remove all fills, orders, and quotes for a phase_id.
+    """Remove all fills, orders, quotes, and reasoning traces for a phase_id.
 
     Called by open_phase to clean up stale data from a previously interrupted
     run that left orphaned rows.
@@ -516,6 +534,7 @@ def delete_phase_data(conn: sqlite3.Connection, phase_id: str) -> None:
     conn.execute("DELETE FROM fills WHERE phase_id = ?", (phase_id,))
     conn.execute("DELETE FROM orders WHERE phase_id = ?", (phase_id,))
     conn.execute("DELETE FROM quotes WHERE phase_id = ?", (phase_id,))
+    conn.execute("DELETE FROM phase_traces WHERE phase_id = ?", (phase_id,))
     conn.commit()
 
 
@@ -537,6 +556,9 @@ def delete_future_data(conn: sqlite3.Connection, market_id: str, cutoff: float) 
         total += conn.execute("DELETE FROM fills WHERE phase_id = ?", (pid,)).rowcount
         total += conn.execute("DELETE FROM orders WHERE phase_id = ?", (pid,)).rowcount
         total += conn.execute("DELETE FROM quotes WHERE phase_id = ?", (pid,)).rowcount
+        total += conn.execute(
+            "DELETE FROM phase_traces WHERE phase_id = ?", (pid,),
+        ).rowcount
     if future_ids:
         placeholders = ",".join("?" for _ in future_ids)
         total += conn.execute(
@@ -549,12 +571,14 @@ def delete_future_data(conn: sqlite3.Connection, market_id: str, cutoff: float) 
 def delete_market_data(conn: sqlite3.Connection, market_id: str) -> None:
     """Remove ALL data associated with a market so it can be re-run fresh.
 
-    Deletes child rows first (fills, orders, quotes, cycle_states, accounts,
-    lifetime stats) then the market and contract rows themselves.
+    Deletes child rows first (fills, orders, quotes, phase traces, phase
+    states, accounts, lifetime stats) then the market and contract rows
+    themselves.
     """
     conn.execute("DELETE FROM fills WHERE contract_id = ?", (market_id,))
     conn.execute("DELETE FROM orders WHERE contract_id = ?", (market_id,))
     conn.execute("DELETE FROM quotes WHERE contract_id = ?", (market_id,))
+    conn.execute("DELETE FROM phase_traces WHERE contract_id = ?", (market_id,))
     conn.execute("DELETE FROM phase_states WHERE contract_id = ?", (market_id,))
     conn.execute("DELETE FROM accounts WHERE market_id = ?", (market_id,))
     conn.execute(
@@ -650,6 +674,96 @@ def positions_before_phase(
         positions[b] = positions.get(b, 0) + sz
         positions[s] = positions.get(s, 0) - sz
     return positions
+
+
+# ---------- phase_traces ----------
+
+def insert_phase_trace(
+    conn: sqlite3.Connection,
+    trace: Dict[str, Any],
+    contract_id: str,
+) -> None:
+    """Persist one reasoning-trace entry emitted by an agent.
+
+    `trace` is the dict shape written by `OpenRouterAgent._record` — the
+    parsed/decision sub-objects are JSON-encoded here so the table stays
+    a flat key/value store.  Uses INSERT OR REPLACE keyed on
+    `(phase_id, account_id)` so that a crashed/rerun phase overwrites
+    any previous in-progress row for the same (phase, agent) pair
+    rather than erroring on the unique constraint.
+    """
+    parsed = trace.get("parsed")
+    decision = trace.get("decision")
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO phase_traces (
+            phase_id, account_id, contract_id, phase_type, model,
+            request, raw_response, parsed_json, decision_json, error,
+            created_at
+        ) VALUES (
+            :phase_id, :account_id, :contract_id, :phase_type, :model,
+            :request, :raw_response, :parsed_json, :decision_json, :error,
+            :created_at
+        )
+        """,
+        {
+            "phase_id": trace["phase_id"],
+            "account_id": trace["account_id"],
+            "contract_id": contract_id,
+            "phase_type": trace.get("phase_type") or trace.get("phase") or "",
+            "model": trace.get("model") or "",
+            "request": trace.get("request") or "",
+            "raw_response": trace.get("raw_response"),
+            "parsed_json": json.dumps(parsed) if parsed is not None else None,
+            "decision_json": json.dumps(decision) if decision is not None else None,
+            "error": trace.get("error"),
+            "created_at": float(trace.get("timestamp") or 0.0),
+        },
+    )
+    conn.commit()
+
+
+def list_phase_traces_by_contract(
+    conn: sqlite3.Connection,
+    contract_id: str,
+) -> List[Dict[str, Any]]:
+    """All trace rows for one contract, ordered by phase timestamp.
+
+    Joins through `phase_states` so the ordering lines up with the
+    chronological phase sequence even when several phases share the
+    same tick epoch (MM before HF inside one pair).  Parsed/decision
+    JSON blobs are decoded back into dicts before returning.
+    """
+    rows = conn.execute(
+        """
+        SELECT t.*, p.created_at AS phase_ts
+          FROM phase_traces t
+          JOIN phase_states p ON t.phase_id = p.id
+         WHERE t.contract_id = ?
+         ORDER BY p.created_at,
+                  CASE t.phase_type WHEN 'MM' THEN 0 ELSE 1 END,
+                  t.account_id
+        """,
+        (contract_id,),
+    ).fetchall()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        parsed_json = d.pop("parsed_json", None)
+        decision_json = d.pop("decision_json", None)
+        d["parsed"] = _loads_or_none(parsed_json)
+        d["decision"] = _loads_or_none(decision_json)
+        out.append(d)
+    return out
+
+
+def _loads_or_none(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------- markets ----------

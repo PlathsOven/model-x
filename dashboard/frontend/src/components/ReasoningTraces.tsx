@@ -9,9 +9,11 @@ type PhaseFilter = "ALL" | "MM" | "HF";
 export function ReasoningTraces({
   episode,
   dataVersion,
+  marketId,
 }: {
   episode: Episode;
   dataVersion: number;
+  marketId?: string | null;
 }) {
   const [traces, setTraces] = useState<AllTraces | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -20,10 +22,10 @@ export function ReasoningTraces({
 
   useEffect(() => {
     api
-      .traces()
+      .traces(marketId)
       .then(setTraces)
       .catch((e) => setErr(e?.message || String(e)));
-  }, [dataVersion]);
+  }, [dataVersion, marketId]);
 
   // Flatten all traces with agent metadata attached
   type FlatTrace = TraceEntry & {
@@ -72,13 +74,9 @@ export function ReasoningTraces({
         <EmptyState>
           <div className="flex flex-col items-center gap-2">
             <AlertCircle className="text-amber-400" />
-            <div>No traces file loaded.</div>
+            <div>No traces recorded yet.</div>
             <div className="text-xs text-zinc-600">
-              Re-run with{" "}
-              <code className="font-mono text-zinc-400">
-                python3 run_live.py
-              </code>{" "}
-              and restart (or click Reload).
+              Traces appear here after the first MM or HF phase completes.
             </div>
           </div>
         </EmptyState>

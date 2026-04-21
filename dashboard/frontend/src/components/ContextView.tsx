@@ -19,7 +19,7 @@ export function ContextView({
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([api.phases(marketId), api.traces()])
+    Promise.all([api.phases(marketId), api.traces(marketId)])
       .then(([p, t]) => {
         setPhases(p);
         setTraces(t);
