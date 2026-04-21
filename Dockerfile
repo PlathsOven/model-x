@@ -15,9 +15,13 @@ WORKDIR /app
 # Keep Python logs unbuffered so they show up live in Railway's log viewer.
 ENV PYTHONUNBUFFERED=1
 
-# System deps: curl for healthchecks/debug, ca-certificates for httpx/yfinance.
+# System deps:
+#   - curl, ca-certificates: healthchecks + TLS for httpx/yfinance
+#   - nano: editor for `railway ssh` admin sessions (edit /data/*.yaml)
+#   - sqlite3: poking at /data/modelx.db from the shell
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates \
+ && apt-get install -y --no-install-recommends \
+      curl ca-certificates nano sqlite3 \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
