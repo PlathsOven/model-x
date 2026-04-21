@@ -37,3 +37,17 @@ export function stripMarketPrefix(accountId: string): string {
   const idx = accountId.indexOf(":");
   return idx >= 0 ? accountId.slice(idx + 1) : accountId;
 }
+
+export function formatSettlementDate(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const iso = raw.replace(" ", "T");
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}

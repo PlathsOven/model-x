@@ -24,20 +24,6 @@ interface MetricColumn {
   colorize?: boolean;
 }
 
-function formatSettlementDate(raw: string | null): string | null {
-  if (!raw) return null;
-  const iso = raw.replace(" ", "T");
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return raw;
-  return d.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 export function PerformanceMetrics({
   episode,
   dataVersion,
@@ -266,53 +252,9 @@ export function PerformanceMetrics({
 
   const activeAccounts = role === "MM" ? mmAccounts : hfAccounts;
   const activeColumns = role === "MM" ? mmColumns : hfColumns;
-  const contract = episode.contract;
-  const settlementDate = formatSettlementDate(contract?.settlement_date ?? null);
 
   return (
     <div className="space-y-6">
-      {/* About this market */}
-      {contract && (
-        <Card title="About this market">
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 space-y-2">
-              <h2 className="text-base font-semibold text-zinc-100">
-                {contract.name}
-              </h2>
-              {contract.description && (
-                <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
-                  {contract.description}
-                </p>
-              )}
-            </div>
-            <div className="rounded-md border border-zinc-800 bg-zinc-950/40 p-4 space-y-3 text-xs">
-              <MetaRow label="Resolution">
-                {settlementDate ?? (
-                  <span className="text-zinc-500">not set</span>
-                )}
-              </MetaRow>
-              <MetaRow label="Settlement">
-                {contract.settlement_value != null ? (
-                  <span className="text-emerald-400 font-medium">
-                    {fmtPrice(contract.settlement_value, 4)}
-                  </span>
-                ) : episode.market_state === "PENDING_SETTLEMENT" ? (
-                  <span className="text-amber-400">pending</span>
-                ) : (
-                  <span className="text-zinc-500">unsettled</span>
-                )}
-              </MetaRow>
-              <MetaRow label="Multiplier">
-                {contract.multiplier.toString()}
-              </MetaRow>
-              <MetaRow label="Position limit">
-                {fmtInt(contract.position_limit)}
-              </MetaRow>
-            </div>
-          </div>
-        </Card>
-      )}
-
       {/* PnL over time */}
       <Card title="PnL over time">
         <div style={{ width: "100%", height: 380 }}>
@@ -418,23 +360,6 @@ export function PerformanceMetrics({
           </div>
         )}
       </Card>
-    </div>
-  );
-}
-
-function MetaRow({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-baseline justify-between gap-4">
-      <span className="text-[10px] uppercase tracking-widest text-zinc-500">
-        {label}
-      </span>
-      <span className="text-zinc-200 text-right">{children}</span>
     </div>
   );
 }
