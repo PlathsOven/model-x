@@ -45,3 +45,23 @@ agents:
     model: z-ai/glm-4.5-air:free
     role: HF
     max_tokens: 8192
+
+  - name: elephant-alpha-mm
+    model: openrouter/elephant-alpha
+    role: MM
+    max_tokens: 8192
+
+  - name: elephant-alpha-hf
+    model: openrouter/elephant-alpha
+    role: HF
+    max_tokens: 8192
+
+  - name: gpt-oss-120b-mm
+    model: openai/gpt-oss-120b:free
+    role: MM
+    max_tokens: 8192
+
+  - name: gpt-oss-120b-hf
+    model: openai/gpt-oss-120b:free
+    role: HF
+    max_tokens: 8192
