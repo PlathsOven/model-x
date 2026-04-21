@@ -32,3 +32,8 @@ export function pnlClass(v: number | null | undefined): string {
   if (v < 0) return "text-red-400";
   return "text-zinc-300";
 }
+
+export function stripMarketPrefix(accountId: string): string {
+  const idx = accountId.indexOf(":");
+  return idx >= 0 ? accountId.slice(idx + 1) : accountId;
+}

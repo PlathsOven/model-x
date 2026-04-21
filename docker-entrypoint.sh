@@ -12,12 +12,12 @@ set -euo pipefail
 VOLUME_DIR="$(dirname "$DB_PATH")"
 mkdir -p "$VOLUME_DIR"
 
-if [ ! -f "$CONTRACT_YAML" ] && [ -f /app/contracts.yaml ]; then
+if [ ! -s "$CONTRACT_YAML" ] && [ -f /app/contracts.yaml ]; then
     echo "[entrypoint] seeding $CONTRACT_YAML from image default"
     cp /app/contracts.yaml "$CONTRACT_YAML"
 fi
 
-if [ ! -f "$AGENTS_YAML" ] && [ -f /app/agents.yaml ]; then
+if [ ! -s "$AGENTS_YAML" ] && [ -f /app/agents.yaml ]; then
     echo "[entrypoint] seeding $AGENTS_YAML from image default"
     cp /app/agents.yaml "$AGENTS_YAML"
 fi

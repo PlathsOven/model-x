@@ -153,15 +153,8 @@ export default function App() {
 
           {/* Contract name */}
           {episode?.contract && (
-            <div className="min-w-0 hidden sm:block">
-              <span className="text-sm text-zinc-300 truncate">
-                {episode.contract.name}
-              </span>
-              {episode.contract.description && (
-                <span className="text-xs text-zinc-500 ml-2 truncate hidden lg:inline">
-                  {episode.contract.description}
-                </span>
-              )}
+            <div className="min-w-0 hidden sm:block text-sm text-zinc-300 truncate">
+              {episode.contract.name}
             </div>
           )}
 
@@ -291,6 +284,7 @@ export default function App() {
               value={fmtInt(episode.stats.total_fills)}
               sub={`${episode.stats.total_volume} vol`}
             />
+            <NextPhaseStat episode={episode} now={now} />
             {episode.settled && episode.contract?.settlement_value != null && (
               <Stat
                 label="Settlement"
@@ -389,6 +383,56 @@ function Stat({
       <span className="text-zinc-500">{label}:</span>
       <span className={`font-medium ${className}`}>{value}</span>
       {sub && <span className="text-zinc-600">{sub}</span>}
+    </span>
+  );
+}
+
+function formatCountdown(secondsRemaining: number): string {
+  const s = Math.max(0, Math.floor(secondsRemaining));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m < 60) return rem === 0 ? `${m}m` : `${m}m ${rem}s`;
+  const h = Math.floor(m / 60);
+  const mm = m % 60;
+  return mm === 0 ? `${h}h` : `${h}h ${mm}m`;
+}
+
+function NextPhaseStat({
+  episode,
+  now,
+}: {
+  episode: Episode;
+  now: number;
+}) {
+  const pd = episode.phase_duration_seconds;
+  if (
+    episode.market_state !== "RUNNING" ||
+    pd == null ||
+    pd <= 0 ||
+    episode.pending_mm == null
+  ) {
+    return null;
+  }
+  const nextTickAt = Math.ceil(now / pd) * pd;
+  const remaining = nextTickAt - now;
+  const isMm = episode.pending_mm === 1;
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className="text-zinc-500">Next:</span>
+      <span
+        className={
+          "rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider border " +
+          (isMm
+            ? "border-blue-800 bg-blue-900/30 text-blue-300"
+            : "border-orange-800 bg-orange-900/30 text-orange-300")
+        }
+      >
+        {isMm ? "MM" : "HF"}
+      </span>
+      <span className="font-medium text-zinc-100 tabular-nums">
+        in {formatCountdown(remaining)}
+      </span>
     </span>
   );
 }

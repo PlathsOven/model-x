@@ -9,9 +9,34 @@ import {
   fmtPnl,
   fmtPrice,
   pnlClass,
+  stripMarketPrefix,
 } from "../lib/format";
 import { Plot, DARK_LAYOUT, PLOTLY_CONFIG } from "../lib/plotly-theme";
 import { Badge, Card, SectionHeader } from "./ui";
+
+type Role = "MM" | "HF";
+
+interface MetricColumn {
+  key: string;
+  label: string;
+  get: (a: string) => number | null | undefined;
+  fmt: (v: number | null | undefined) => string;
+  colorize?: boolean;
+}
+
+function formatSettlementDate(raw: string | null): string | null {
+  if (!raw) return null;
+  const iso = raw.replace(" ", "T");
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return raw;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 export function PerformanceMetrics({
   episode,
@@ -48,6 +73,15 @@ export function PerformanceMetrics({
     [mmAccounts, hfAccounts]
   );
 
+  const hasMm = mmAccounts.length > 0;
+  const hasHf = hfAccounts.length > 0;
+
+  const [role, setRole] = useState<Role>(hasMm ? "MM" : "HF");
+  useEffect(() => {
+    if (role === "MM" && !hasMm && hasHf) setRole("HF");
+    else if (role === "HF" && !hasHf && hasMm) setRole("MM");
+  }, [role, hasMm, hasHf]);
+
   // Build per-phase PnL chart data.
   const pnlTraces = useMemo(() => {
     if (!positions) return [];
@@ -61,10 +95,10 @@ export function PerformanceMetrics({
         y: points.map((p) => p.pnl_realized ?? p.pnl_mtm),
         type: "scatter" as const,
         mode: "lines" as const,
-        name: a,
+        name: stripMarketPrefix(a),
         line: { color: agentColors[a], width: 2 },
         connectgaps: true,
-        hovertemplate: `${a}<br>PnL: %{y:.4f}<br>%{x}<extra></extra>`,
+        hovertemplate: `${stripMarketPrefix(a)}<br>PnL: %{y:.4f}<br>%{x}<extra></extra>`,
       };
     });
   }, [positions, agentColors]);
@@ -94,13 +128,205 @@ export function PerformanceMetrics({
     []
   );
 
+  const mmColumns: MetricColumn[] = useMemo(
+    () => [
+      {
+        key: "total_pnl",
+        label: "Total PnL",
+        get: (a) => metrics?.mm[a]?.total_pnl,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+      {
+        key: "sharpe",
+        label: "Sharpe",
+        get: (a) => metrics?.mm[a]?.sharpe,
+        fmt: (v) => fmtPrice(v, 4),
+        colorize: true,
+      },
+      {
+        key: "volume",
+        label: "Volume",
+        get: (a) => metrics?.mm[a]?.volume,
+        fmt: fmtInt,
+      },
+      {
+        key: "volume_share",
+        label: "Volume share",
+        get: (a) => metrics?.mm[a]?.volume_share,
+        fmt: (v) => fmtPct(v, 1),
+      },
+      {
+        key: "pnl_bps",
+        label: "PnL bps",
+        get: (a) => metrics?.mm[a]?.pnl_bps,
+        fmt: (v) => fmtBps(v, 1),
+        colorize: true,
+      },
+      {
+        key: "uptime",
+        label: "Uptime",
+        get: (a) => metrics?.mm[a]?.uptime,
+        fmt: (v) => fmtPct(v, 0),
+      },
+      {
+        key: "consensus",
+        label: "Consensus",
+        get: (a) => metrics?.mm[a]?.consensus,
+        fmt: (v) => fmtPct(v, 1),
+      },
+      {
+        key: "markout_2",
+        label: "Markout 2",
+        get: (a) => metrics?.mm[a]?.markout_2,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+      {
+        key: "markout_10",
+        label: "Markout 10",
+        get: (a) => metrics?.mm[a]?.markout_10,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+      {
+        key: "markout_40",
+        label: "Markout 40",
+        get: (a) => metrics?.mm[a]?.markout_40,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+      {
+        key: "avg_abs_position",
+        label: "Avg |pos|",
+        get: (a) => metrics?.mm[a]?.avg_abs_position,
+        fmt: (v) => fmtPrice(v, 2),
+      },
+      {
+        key: "self_cross_count",
+        label: "Self-cross ct",
+        get: (a) => metrics?.mm[a]?.self_cross_count,
+        fmt: fmtInt,
+      },
+      {
+        key: "self_cross_volume",
+        label: "Self-cross vol",
+        get: (a) => metrics?.mm[a]?.self_cross_volume,
+        fmt: fmtInt,
+      },
+    ],
+    [metrics]
+  );
+
+  const hfColumns: MetricColumn[] = useMemo(
+    () => [
+      {
+        key: "total_pnl",
+        label: "Total PnL",
+        get: (a) => metrics?.hf[a]?.total_pnl,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+      {
+        key: "sharpe",
+        label: "Sharpe",
+        get: (a) => metrics?.hf[a]?.sharpe,
+        fmt: (v) => fmtPrice(v, 4),
+        colorize: true,
+      },
+      {
+        key: "markout_2",
+        label: "Markout 2",
+        get: (a) => metrics?.hf[a]?.markout_2,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+      {
+        key: "markout_10",
+        label: "Markout 10",
+        get: (a) => metrics?.hf[a]?.markout_10,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+      {
+        key: "markout_40",
+        label: "Markout 40",
+        get: (a) => metrics?.hf[a]?.markout_40,
+        fmt: fmtPnl,
+        colorize: true,
+      },
+    ],
+    [metrics]
+  );
+
   if (err)
     return <div className="text-sm text-red-400 font-mono">{err}</div>;
   if (!metrics || !positions)
     return <div className="text-sm text-zinc-500">Loading...</div>;
 
+  const activeAccounts = role === "MM" ? mmAccounts : hfAccounts;
+  const activeColumns = role === "MM" ? mmColumns : hfColumns;
+  const contract = episode.contract;
+  const settlementDate = formatSettlementDate(contract?.settlement_date ?? null);
+
   return (
     <div className="space-y-6">
+      {/* About this market */}
+      {contract && (
+        <Card title="About this market">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 space-y-2">
+              <h2 className="text-base font-semibold text-zinc-100">
+                {contract.name}
+              </h2>
+              {contract.description && (
+                <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                  {contract.description}
+                </p>
+              )}
+            </div>
+            <div className="rounded-md border border-zinc-800 bg-zinc-950/40 p-4 space-y-3 text-xs">
+              <MetaRow label="Resolution">
+                {settlementDate ?? (
+                  <span className="text-zinc-500">not set</span>
+                )}
+              </MetaRow>
+              <MetaRow label="Settlement">
+                {contract.settlement_value != null ? (
+                  <span className="text-emerald-400 font-medium">
+                    {fmtPrice(contract.settlement_value, 4)}
+                  </span>
+                ) : episode.market_state === "PENDING_SETTLEMENT" ? (
+                  <span className="text-amber-400">pending</span>
+                ) : (
+                  <span className="text-zinc-500">unsettled</span>
+                )}
+              </MetaRow>
+              <MetaRow label="Multiplier">
+                {contract.multiplier.toString()}
+              </MetaRow>
+              <MetaRow label="Position limit">
+                {fmtInt(contract.position_limit)}
+              </MetaRow>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* PnL over time */}
+      <Card title="PnL over time">
+        <div style={{ width: "100%", height: 380 }}>
+          <Plot
+            data={pnlTraces as any}
+            layout={pnlLayout as any}
+            config={PLOTLY_CONFIG as any}
+            useResizeHandler
+            style={{ width: "100%", height: "100%" }}
+          />
+        </div>
+      </Card>
+
+      {/* Performance metrics */}
       <SectionHeader
         title="Performance metrics"
         subtitle={
@@ -117,222 +343,162 @@ export function PerformanceMetrics({
         }
       />
 
-      {/* MM metrics table */}
-      {mmAccounts.length > 0 && (
-        <Card title="Market makers">
-          <div className="overflow-x-auto">
-            <table className="text-sm tabular">
-              <thead>
-                <tr className="text-[11px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
-                  <th className="py-2 pr-4 text-left font-medium">Metric</th>
-                  {mmAccounts.map((a) => (
-                    <th
-                      key={a}
-                      className="py-2 px-3 text-right font-medium font-mono"
-                      style={{ color: agentColors[a] }}
-                    >
-                      {a}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                <MetricRow
-                  label="total_pnl"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.total_pnl}
-                  fmt={fmtPnl}
-                  colorize
-                />
-                <MetricRow
-                  label="sharpe"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.sharpe}
-                  fmt={(v) => fmtPrice(v, 4)}
-                  colorize
-                />
-                <MetricRow
-                  label="volume"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.volume}
-                  fmt={fmtInt}
-                />
-                <MetricRow
-                  label="volume_share"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.volume_share}
-                  fmt={(v) => fmtPct(v, 1)}
-                />
-                <MetricRow
-                  label="pnl_bps"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.pnl_bps}
-                  fmt={(v) => fmtBps(v, 1)}
-                  colorize
-                />
-                <MetricRow
-                  label="uptime"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.uptime}
-                  fmt={(v) => fmtPct(v, 0)}
-                />
-                <MetricRow
-                  label="consensus"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.consensus}
-                  fmt={(v) => fmtPct(v, 1)}
-                />
-                <MetricRow
-                  label="markout_2"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.markout_2}
-                  fmt={fmtPnl}
-                  colorize
-                />
-                <MetricRow
-                  label="markout_10"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.markout_10}
-                  fmt={fmtPnl}
-                  colorize
-                />
-                <MetricRow
-                  label="markout_40"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.markout_40}
-                  fmt={fmtPnl}
-                  colorize
-                />
-                <MetricRow
-                  label="avg_abs_position"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.avg_abs_position}
-                  fmt={(v) => fmtPrice(v, 2)}
-                />
-                <MetricRow
-                  label="self_cross_count"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.self_cross_count}
-                  fmt={fmtInt}
-                />
-                <MetricRow
-                  label="self_cross_volume"
-                  agents={mmAccounts}
-                  get={(a) => metrics.mm[a]?.self_cross_volume}
-                  fmt={fmtInt}
-                />
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
-
-      {/* HF metrics table */}
-      {hfAccounts.length > 0 && (
-        <Card title="Hedge funds">
-          <div className="overflow-x-auto">
-            <table className="text-sm tabular">
-              <thead>
-                <tr className="text-[11px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
-                  <th className="py-2 pr-4 text-left font-medium">Metric</th>
-                  {hfAccounts.map((a) => (
-                    <th
-                      key={a}
-                      className="py-2 px-3 text-right font-medium font-mono"
-                      style={{ color: agentColors[a] }}
-                    >
-                      {a}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                <MetricRow
-                  label="total_pnl"
-                  agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.total_pnl}
-                  fmt={fmtPnl}
-                  colorize
-                />
-                <MetricRow
-                  label="sharpe"
-                  agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.sharpe}
-                  fmt={(v) => fmtPrice(v, 4)}
-                  colorize
-                />
-                <MetricRow
-                  label="markout_2"
-                  agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.markout_2}
-                  fmt={fmtPnl}
-                  colorize
-                />
-                <MetricRow
-                  label="markout_10"
-                  agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.markout_10}
-                  fmt={fmtPnl}
-                  colorize
-                />
-                <MetricRow
-                  label="markout_40"
-                  agents={hfAccounts}
-                  get={(a) => metrics.hf[a]?.markout_40}
-                  fmt={fmtPnl}
-                  colorize
-                />
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
-
-      {/* PnL over time chart */}
-      <Card title="PnL over time">
-        <div style={{ width: "100%", height: 380 }}>
-          <Plot
-            data={pnlTraces as any}
-            layout={pnlLayout as any}
-            config={PLOTLY_CONFIG as any}
-            useResizeHandler
-            style={{ width: "100%", height: "100%" }}
+      <Card
+        title={role === "MM" ? "Market makers" : "Hedge funds"}
+        action={
+          <RoleToggle
+            role={role}
+            onChange={setRole}
+            mmEnabled={hasMm}
+            hfEnabled={hasHf}
           />
-        </div>
+        }
+      >
+        {activeAccounts.length === 0 ? (
+          <div className="text-sm text-zinc-500">
+            No {role === "MM" ? "market makers" : "hedge funds"} in this market.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="text-sm tabular">
+              <thead>
+                <tr className="text-[11px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
+                  <th className="py-2 pr-4 text-left font-medium sticky left-0 bg-zinc-900/60 z-10">
+                    Model
+                  </th>
+                  {activeColumns.map((c) => (
+                    <th
+                      key={c.key}
+                      className="py-2 px-3 text-right font-medium whitespace-nowrap"
+                    >
+                      {c.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {activeAccounts.map((a) => (
+                  <tr
+                    key={a}
+                    className="border-b border-zinc-900 last:border-0 hover:bg-zinc-900/40"
+                  >
+                    <td className="py-1.5 pr-4 sticky left-0 bg-zinc-900/60">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
+                          style={{ background: agentColors[a] }}
+                        />
+                        <span className="font-mono text-zinc-200 text-xs">
+                          {stripMarketPrefix(a)}
+                        </span>
+                      </div>
+                    </td>
+                    {activeColumns.map((c) => {
+                      const v = c.get(a);
+                      const cls = c.colorize
+                        ? pnlClass(v ?? null)
+                        : "text-zinc-200";
+                      return (
+                        <td
+                          key={c.key}
+                          className={`py-1.5 px-3 text-right ${cls}`}
+                        >
+                          {v === null || v === undefined ? (
+                            <span className="text-zinc-600">---</span>
+                          ) : (
+                            c.fmt(v as number)
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
     </div>
   );
 }
 
-function MetricRow({
+function MetaRow({
   label,
-  agents,
-  get,
-  fmt,
-  colorize = false,
+  children,
 }: {
   label: string;
-  agents: string[];
-  get: (a: string) => number | null | undefined;
-  fmt: (v: number | null | undefined) => string;
-  colorize?: boolean;
+  children: React.ReactNode;
 }) {
   return (
-    <tr className="border-b border-zinc-900 last:border-0">
-      <td className="py-1.5 pr-4 text-zinc-400 text-xs">{label}</td>
-      {agents.map((a) => {
-        const v = get(a);
-        const cls = colorize ? pnlClass(v ?? null) : "text-zinc-200";
-        return (
-          <td key={a} className={`py-1.5 px-3 text-right ${cls}`}>
-            {v === null || v === undefined ? (
-              <span className="text-zinc-600">---</span>
-            ) : (
-              fmt(v as number)
-            )}
-          </td>
-        );
-      })}
-    </tr>
+    <div className="flex items-baseline justify-between gap-4">
+      <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+        {label}
+      </span>
+      <span className="text-zinc-200 text-right">{children}</span>
+    </div>
+  );
+}
+
+function RoleToggle({
+  role,
+  onChange,
+  mmEnabled,
+  hfEnabled,
+}: {
+  role: Role;
+  onChange: (r: Role) => void;
+  mmEnabled: boolean;
+  hfEnabled: boolean;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Agent role"
+      className="inline-flex rounded-md border border-zinc-700 bg-zinc-950 p-0.5"
+    >
+      <ToggleButton
+        label="MM"
+        active={role === "MM"}
+        disabled={!mmEnabled}
+        onClick={() => onChange("MM")}
+      />
+      <ToggleButton
+        label="HF"
+        active={role === "HF"}
+        disabled={!hfEnabled}
+        onClick={() => onChange("HF")}
+      />
+    </div>
+  );
+}
+
+function ToggleButton({
+  label,
+  active,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      role="tab"
+      aria-selected={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={
+        "px-3 py-1 text-xs font-medium rounded transition-colors " +
+        (active
+          ? "bg-zinc-700 text-zinc-100"
+          : disabled
+            ? "text-zinc-600 cursor-not-allowed"
+            : "text-zinc-400 hover:text-zinc-100")
+      }
+    >
+      {label}
+    </button>
   );
 }

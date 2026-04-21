@@ -17,7 +17,8 @@ export const DARK_LAYOUT: Partial<Plotly.Layout> = {
 
 export const PLOTLY_CONFIG: Partial<Plotly.Config> = {
   scrollZoom: true,
-  displayModeBar: true,
+  displayModeBar: "hover" as any,
+  displaylogo: false,
   responsive: true,
   modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"],
 };
