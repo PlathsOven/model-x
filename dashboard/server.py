@@ -462,14 +462,27 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
     """Settlement-independent MM metrics, computed the same way scoring.py does
     but without the settlement-dependent fields."""
     mm_accounts = {q.account_id for p in ms.phases for q in p.quotes}
-    total_volume = sum(f.size for f in ms.all_fills)
     mm_phases = [p for p in ms.phases if p.state.phase_type == "MM"]
+    per_acct_volume = {
+        a: sum(
+            f.size for f in ms.all_fills
+            if f.buyer_account_id == a or f.seller_account_id == a
+        )
+        for a in mm_accounts
+    }
+    per_acct_notional = {
+        a: sum(
+            f.price * f.size for f in ms.all_fills
+            if f.buyer_account_id == a or f.seller_account_id == a
+        )
+        for a in mm_accounts
+    }
+    total_volume = sum(per_acct_volume.values())
+    total_notional = sum(per_acct_notional.values())
     result: Dict[str, dict] = {}
     for acct in sorted(mm_accounts):
-        volume = sum(
-            f.size for f in ms.all_fills
-            if f.buyer_account_id == acct or f.seller_account_id == acct
-        )
+        volume = per_acct_volume[acct]
+        notional = per_acct_notional[acct]
         quoted = sum(
             1 for p in mm_phases if any(q.account_id == acct for q in p.quotes)
         )
@@ -506,6 +519,8 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
             "sharpe": None,
             "volume": volume,
             "volume_share": (volume / total_volume) if total_volume > 0 else 0.0,
+            "notional": notional,
+            "notional_share": (notional / total_notional) if total_notional > 0 else 0.0,
             "pnl_bps": None,
             "uptime": uptime,
             "consensus": consensus,

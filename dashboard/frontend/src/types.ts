@@ -211,6 +211,8 @@ export interface MMScoresDict {
   sharpe: number;
   volume: number;
   volume_share: number;
+  notional: number;
+  notional_share: number;
   pnl_bps: number;
   uptime: number;
   consensus: number;

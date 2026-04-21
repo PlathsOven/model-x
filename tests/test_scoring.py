@@ -103,6 +103,8 @@ def test_single_mm_single_hf_metrics():
     assert mm["mm-A"].volume == 9
     assert mm["mm-A"].volume_share == 1.0
     # Notional = 3*105 + 3*110 + 3*115 = 990; pnl_bps = 10000 * -45 / 990.
+    assert abs(mm["mm-A"].notional - 990.0) < 1e-9
+    assert mm["mm-A"].notional_share == 1.0
     assert abs(mm["mm-A"].pnl_bps - (10000 * -45.0 / 990.0)) < 1e-6
     assert mm["mm-A"].uptime == 1.0
     assert mm["mm-A"].consensus == 1.0  # no other MMs
@@ -173,9 +175,14 @@ def test_mm_cross_consensus_drops_to_zero():
     # Each is on one side of the single 5-lot fill.
     assert mm["mm-A"].volume == 5
     assert mm["mm-B"].volume == 5
-    # Total market volume = 5, each has share 1.0.
-    assert mm["mm-A"].volume_share == 1.0
-    assert mm["mm-B"].volume_share == 1.0
+    # Sum of per-MM volumes = 10, each has share 0.5 -> sums to 100%.
+    assert mm["mm-A"].volume_share == 0.5
+    assert mm["mm-B"].volume_share == 0.5
+    # Fill price = midpoint(105, 106) = 105.5; notional per MM = 5 * 105.5.
+    assert abs(mm["mm-A"].notional - 527.5) < 1e-9
+    assert abs(mm["mm-B"].notional - 527.5) < 1e-9
+    assert mm["mm-A"].notional_share == 0.5
+    assert mm["mm-B"].notional_share == 0.5
 
 
 def test_uptime_partial():

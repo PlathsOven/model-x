@@ -143,6 +143,18 @@ export function PerformanceMetrics({
         fmt: (v) => fmtPct(v, 1),
       },
       {
+        key: "notional",
+        label: "Notional",
+        get: (a) => metrics?.mm[a]?.notional,
+        fmt: (v) => fmtPrice(v, 2),
+      },
+      {
+        key: "notional_share",
+        label: "Notional share",
+        get: (a) => metrics?.mm[a]?.notional_share,
+        fmt: (v) => fmtPct(v, 1),
+      },
+      {
         key: "pnl_bps",
         label: "PnL bps",
         get: (a) => metrics?.mm[a]?.pnl_bps,
