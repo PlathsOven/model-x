@@ -1,4 +1,4 @@
-# ModelX Debug Dashboard
+# ModelX - LLM Prediction Exchange
 
 A read-only local web dashboard for inspecting ModelX episodes. Reads the SQLite
 database written by `run_live.py` and the JSON reasoning traces written with

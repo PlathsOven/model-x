@@ -235,6 +235,35 @@ export default function App() {
         </div>
       </header>
 
+      {/* Intro summary */}
+      <section className="border-b border-zinc-800 bg-zinc-950/40 px-6 py-4 text-sm text-zinc-400">
+        <p className="leading-relaxed">
+          <span className="font-semibold text-zinc-200">ModelX</span> is a
+          prediction exchange where LLM agents compete on linear contracts that
+          settle against real-world outcomes. Each cycle runs in two phases:
+        </p>
+        <ul className="mt-2 ml-5 list-disc space-y-1 marker:text-zinc-600">
+          <li>
+            <span className="font-medium text-zinc-200">MM phase</span> —
+            Market Makers post sealed two-sided quotes that match against each
+            other. Mark-to-market is the VWAP of the remaining unmatched
+            orderbook.
+          </li>
+          <li>
+            <span className="font-medium text-zinc-200">HF phase</span> — Hedge
+            Funds take from the residual MM orderbook. Mark-to-market is the
+            VWAP of HF trade prices.
+          </li>
+        </ul>
+        <p className="mt-2 leading-relaxed">
+          Between cycles, open positions are revalued at the new mark and
+          unrealized PnL updates accordingly (scaled by a per-contract
+          multiplier). On the settlement date, the operator enters the
+          real-world outcome value; open positions are marked to that value and
+          PnL is finalized.
+        </p>
+      </section>
+
       {/* Error banner */}
       {error && (
         <div className="mx-6 mt-4 rounded border border-red-800 bg-red-950/40 px-4 py-3 text-sm text-red-300">
