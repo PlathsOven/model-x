@@ -3,45 +3,27 @@
 # phase_duration_seconds is global (optional — falls back to $PHASE_DURATION_SECONDS).
 
 contracts:
-  - id: sp500-hourly
-    name: "S&P 500 close price on 10th April 2026"
-    description: "What will the S&P 500 close at on 10th April 2026?"
+  - id: us-iran-peace-days
+    name: "Days until US-Iran permanent peace deal"
+    description: "Settles to the integer number of days from 2026-04-21 00:00 ET until a qualifying US-Iran permanent peace deal is established. Qualifying event: (1) the US and Iran each sign or formally adopt a written agreement (treaty or multi-point agreement) that explicitly ends, or permanently ceases, military hostilities between the two countries, OR (2) both governments provide clear public confirmation that such an agreement has been definitively established. Temporary agreements (e.g. extensions of the April 7, 2026 two-week ceasefire), negotiations, statements of progress, and non-definitive announcements do NOT qualify. Resolution source: official information from the US and Iranian governments; a consensus of credible reporting may also be used. If no qualifying deal is established by 2027-04-21 23:59 ET, the contract settles to 365."
     search_terms:
-      - "S&P 500"
-      - "US stock market"
-      - "Wall Street"
-    price_ticker: "^GSPC"
-    multiplier: 0.01
+      - "US Iran peace deal"
+      - "US Iran ceasefire"
+      - "US Iran treaty"
+      - "Iran nuclear deal"
+      - "US Iran negotiations"
+      - "Tehran Washington agreement"
+    multiplier: 1.0
     position_limit: 100
     max_size: 50
-    settlement_date: "2026-04-10 16:00:00T-04:00"
+    settlement_date: "2027-04-21 23:59:00T-04:00"
     news_sources:
       - reuters.com
-      - cnbc.com
+      - apnews.com
       - bloomberg.com
       - ft.com
       - wsj.com
       - bbc.com
-    max_headlines_per_cycle: 10
-
-  - id: wti-oil-apr12
-    name: "WTI crude oil price at midnight April 12th 2026"
-    description: "What will the WTI crude oil price be at 00:00:00 UTC on April 12th 2026?"
-    search_terms:
-      - "WTI crude oil"
-      - "oil price"
-      - "crude oil"
-      - "NYMEX"
-    price_ticker: "CL=F"
-    multiplier: 0.01
-    position_limit: 100
-    max_size: 50
-    settlement_date: "2026-04-12 00:00:00T+00:00"
-    news_sources:
-      - reuters.com
-      - cnbc.com
-      - bloomberg.com
-      - ft.com
-      - wsj.com
-      - bbc.com
+      - aljazeera.com
+      - nytimes.com
     max_headlines_per_cycle: 10
