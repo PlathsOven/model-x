@@ -12,7 +12,7 @@ import { PerformanceMetrics } from "./components/PerformanceMetrics";
 import { PositionTracker } from "./components/PositionTracker";
 import { LifetimeMetricsView } from "./components/LifetimeMetrics";
 import { ContextView } from "./components/ContextView";
-import { fmtInt } from "./lib/format";
+import { fmtInt, fmtPrice, formatSettlementDate } from "./lib/format";
 
 const POLL_INTERVAL_MS = 2000;
 
@@ -292,13 +292,23 @@ export default function App() {
                 className="text-emerald-400"
               />
             )}
-            {!episode.settled && episode.market_state === "PENDING_SETTLEMENT" && (
-              <Stat label="Status" value="Pending Settlement" className="text-amber-400" />
-            )}
-            {!episode.settled && episode.market_state !== "PENDING_SETTLEMENT" && (
-              <Stat label="Status" value="Unsettled" className="text-amber-400" />
+            {!episode.settled &&
+              episode.market_state === "PENDING_SETTLEMENT" && (
+                <Stat
+                  label="Status"
+                  value="Pending settlement"
+                  className="text-amber-400"
+                />
+              )}
+            {!episode.settled && episode.market_state === "PAUSED" && (
+              <Stat label="Status" value="Paused" className="text-zinc-400" />
             )}
           </div>
+
+          {/* About this market */}
+          {episode.contract && (
+            <AboutMarket episode={episode} />
+          )}
 
           {/* Horizontal tab bar */}
           <nav className="flex items-center gap-1 px-6 py-2 border-b border-zinc-800 overflow-x-auto">
@@ -384,6 +394,76 @@ function Stat({
       <span className={`font-medium ${className}`}>{value}</span>
       {sub && <span className="text-zinc-600">{sub}</span>}
     </span>
+  );
+}
+
+function AboutMarket({ episode }: { episode: Episode }) {
+  const contract = episode.contract;
+  if (!contract) return null;
+  const settlementDate = formatSettlementDate(contract.settlement_date);
+  return (
+    <div className="px-6 py-4 border-b border-zinc-800">
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900/60">
+        <div className="px-4 py-3 border-b border-zinc-800">
+          <div className="text-sm font-semibold text-zinc-100">
+            About this market
+          </div>
+        </div>
+        <div className="p-4 grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-2">
+            <h2 className="text-base font-semibold text-zinc-100">
+              {contract.name}
+            </h2>
+            {contract.description && (
+              <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                {contract.description}
+              </p>
+            )}
+          </div>
+          <div className="rounded-md border border-zinc-800 bg-zinc-950/40 p-4 space-y-3 text-xs">
+            <MetaRow label="Resolution">
+              {settlementDate ?? (
+                <span className="text-zinc-500">not set</span>
+              )}
+            </MetaRow>
+            <MetaRow label="Settlement">
+              {contract.settlement_value != null ? (
+                <span className="text-emerald-400 font-medium">
+                  {fmtPrice(contract.settlement_value, 4)}
+                </span>
+              ) : episode.market_state === "PENDING_SETTLEMENT" ? (
+                <span className="text-amber-400">pending</span>
+              ) : (
+                <span className="text-zinc-500">unsettled</span>
+              )}
+            </MetaRow>
+            <MetaRow label="Multiplier">
+              {contract.multiplier.toString()}
+            </MetaRow>
+            <MetaRow label="Position limit">
+              {fmtInt(contract.position_limit)}
+            </MetaRow>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MetaRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-4">
+      <span className="text-[10px] uppercase tracking-widest text-zinc-500">
+        {label}
+      </span>
+      <span className="text-zinc-200 text-right">{children}</span>
+    </div>
   );
 }
 
