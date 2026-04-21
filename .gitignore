@@ -22,5 +22,4 @@ Thumbs.db
 *.log
 
 # Model X specific
-.claude/
 model-x-session-md.txt
