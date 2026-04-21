@@ -33,6 +33,8 @@ if _REPO_ROOT not in sys.path:
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from modelx.phase import Phase, load_phase
 from modelx.db import (
@@ -1208,18 +1210,50 @@ def reload_state():
     }
 
 
+# ---------- static frontend ----------
+
+# Serve the built Vite frontend (dashboard/frontend/dist) when present. All
+# `/api/*` routes above are registered first and win route matching; anything
+# else falls through to the static files, and unknown paths serve index.html
+# so React Router / direct deep-links work on refresh.
+_FRONTEND_DIST = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "frontend", "dist",
+)
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount(
+        "/assets",
+        StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")),
+        name="assets",
+    )
+
+    @app.get("/{full_path:path}")
+    def _spa(full_path: str):
+        candidate = os.path.join(_FRONTEND_DIST, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
+
+
 # ---------- entrypoint ----------
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", default="modelx.db", help="SQLite db path")
+    parser.add_argument(
+        "--db", default=os.environ.get("DB_PATH", "modelx.db"),
+        help="SQLite db path (default: $DB_PATH or modelx.db)",
+    )
     parser.add_argument(
         "--traces",
-        default="episode_traces.json",
-        help="reasoning traces JSON path",
+        default=os.environ.get("TRACES_PATH", "episode_traces.json"),
+        help="reasoning traces JSON path (default: $TRACES_PATH or episode_traces.json)",
     )
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--port", type=int,
+        default=int(os.environ.get("PORT", "8000")),
+    )
+    parser.add_argument(
+        "--host", default=os.environ.get("HOST", "127.0.0.1"),
+    )
     args = parser.parse_args()
 
     CONFIG.db_path = args.db
