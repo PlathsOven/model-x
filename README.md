@@ -259,8 +259,10 @@ Two tables print after settlement: one for market makers, one for hedge funds.
 | `total_pnl` | Final P&L in points (positive = profit) |
 | `sharpe` | Risk-adjusted return — mean per-cycle P&L change divided by its standard deviation. Higher = more consistent |
 | `volume` | Total contracts traded across all cycles |
-| `volume_share` | Their share of total market volume. Note that both sides of every fill count, so shares across all participants sum above 1.0 |
-| `pnl_bps` | P&L as basis points of notional traded (`10000 * pnl / sum(price * size)`) — "edge per dollar of notional" |
+| `volume_share` | Their `volume` divided by the sum of every MM's `volume`. Sums to 1.0 across all MMs |
+| `notional` | Sum of `price * size` across their fills |
+| `notional_share` | Their `notional` divided by the sum of every MM's `notional`. Sums to 1.0 across all MMs |
+| `pnl_bps` | P&L as basis points of notional traded (`10000 * pnl / notional`) — "edge per dollar of notional" |
 | `uptime` | Fraction of cycles where the MM submitted a quote. 1.0 = quoted every cycle |
 | `consensus` | 1.0 minus the share of their volume that traded against another MM. High consensus = they were alone at their price |
 | `markout_2` / `markout_10` / `markout_40` | Average per-contract P&L move N phases after each fill, from the MM's perspective. Positive = trades that aged well |

@@ -24,6 +24,8 @@ class MMScores:
     sharpe: float
     volume: int
     volume_share: float
+    notional: float
+    notional_share: float
     pnl_bps: float
     uptime: float
     consensus: float
@@ -65,21 +67,22 @@ def score_mm(
     marks = _carry_mark_forward(phases)
     mm_accounts = _mm_accounts(phases)
 
-    # Volume share: denominator is total MM-phase volume only.
-    mm_fills = [f for f in fills if f.phase == "MM"]
-    total_mm_volume = sum(f.size for f in mm_fills)
+    per_acct_volume = {a: _account_volume(fills, a) for a in mm_accounts}
+    per_acct_notional = {a: _account_notional(fills, a) for a in mm_accounts}
+    total_volume = sum(per_acct_volume.values())
+    total_notional = sum(per_acct_notional.values())
 
     result: Dict[str, MMScores] = {}
     for acct in sorted(mm_accounts):
         pnl_series = _phase_pnl_series(phases, marks, acct, contract.multiplier)
-        volume = _account_volume(fills, acct)
-        notional = _account_notional(fills, acct)
+        volume = per_acct_volume[acct]
+        notional = per_acct_notional[acct]
         total_pnl = _pnl(
             fills, positions.get(acct, 0), acct, mark, contract.multiplier,
         )
         pnl_bps_val = 10000.0 * total_pnl / notional if notional > 0 else 0.0
-        mm_acct_vol = _account_volume(mm_fills, acct)
-        vol_share = mm_acct_vol / total_mm_volume if total_mm_volume > 0 else 0.0
+        vol_share = volume / total_volume if total_volume > 0 else 0.0
+        notional_share = notional / total_notional if total_notional > 0 else 0.0
         self_count, self_vol = _self_crosses(fills, acct)
         result[acct] = MMScores(
             account_id=acct,
@@ -87,6 +90,8 @@ def score_mm(
             sharpe=_sharpe(pnl_series),
             volume=volume,
             volume_share=vol_share,
+            notional=notional,
+            notional_share=notional_share,
             pnl_bps=pnl_bps_val,
             uptime=_uptime(phases, acct),
             consensus=_consensus(fills, acct, mm_accounts),
