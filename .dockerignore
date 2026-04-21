@@ -1,0 +1,40 @@
+# Keep the Docker build context small and prevent local state from
+# leaking into the image.
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / frontend (built inside the image, not copied from host)
+dashboard/frontend/node_modules
+dashboard/frontend/dist
+
+# Local state — must NEVER end up baked into the image
+modelx.db
+modelx.db.bak
+*.sqlite
+*.sqlite3
+episode_traces.json
+
+# Git + editor
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+
+# Docs / tests not needed at runtime
+docs/
+tests/
+.context/
+
+# Local env files
+.env
+.env.*
