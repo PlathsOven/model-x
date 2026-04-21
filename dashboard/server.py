@@ -746,6 +746,8 @@ def episode(market_id: Optional[str] = Query(None)):
     last_phase_ts = ms.market.last_phase_ts if ms.market is not None else (
         ms.phase_states[-1].created_at if ms.phase_states else 0.0
     )
+    pending_mm = ms.market.pending_mm if ms.market is not None else 1
+    phase_duration_seconds = _derive_phase_duration(ms.phase_states)
 
     return {
         "contract": {
@@ -760,6 +762,8 @@ def episode(market_id: Optional[str] = Query(None)):
         "market_state": market_state,
         "phase_count": len(ms.phase_states),
         "last_phase_ts": last_phase_ts,
+        "pending_mm": pending_mm,
+        "phase_duration_seconds": phase_duration_seconds,
         "settled": ms.contract.settlement_value is not None,
         "accounts": accounts_payload,
         "stats": {
@@ -770,6 +774,23 @@ def episode(market_id: Optional[str] = Query(None)):
         },
         **_status_envelope(state),
     }
+
+
+def _derive_phase_duration(phase_states: List[PhaseState]) -> Optional[float]:
+    """Median of consecutive phase-timestamp deltas, or None if < 2 phases.
+
+    The supervisor fires on wall-clock multiples of `phase_duration_seconds`,
+    so consecutive phases land one period apart. Taking the median protects
+    against one-off gaps (e.g. resume after Ctrl-C).
+    """
+    if len(phase_states) < 2:
+        return None
+    diffs = sorted(
+        phase_states[i + 1].created_at - phase_states[i].created_at
+        for i in range(len(phase_states) - 1)
+    )
+    mid = diffs[len(diffs) // 2]
+    return round(mid, 3) if mid > 0 else None
 
 
 @app.get("/api/phases")

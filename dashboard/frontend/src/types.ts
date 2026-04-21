@@ -39,6 +39,8 @@ export interface Episode {
   market_state?: MarketState;
   phase_count?: number;
   last_phase_ts?: number;
+  pending_mm?: number;
+  phase_duration_seconds?: number | null;
   settled: boolean;
   accounts: AccountSummary[];
   stats: EpisodeStats;

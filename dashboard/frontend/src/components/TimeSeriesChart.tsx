@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { Episode, Timeseries } from "../types";
 import { PHASE_COLORS, buildAgentColors } from "../lib/colors";
-import { fmtPrice } from "../lib/format";
+import { fmtPrice, stripMarketPrefix } from "../lib/format";
 import { Plot, DARK_LAYOUT, PLOTLY_CONFIG } from "../lib/plotly-theme";
+
+const FILL_MARKER_SIZE = 5;
 
 interface LayerToggles {
   mark: boolean;
@@ -45,7 +47,7 @@ interface FillRow {
 }
 
 export function TimeSeriesChart({
-  episode: _episode,
+  episode,
   dataVersion,
   focusPhaseId,
   onClearFocus,
@@ -61,13 +63,18 @@ export function TimeSeriesChart({
   const [err, setErr] = useState<string | null>(null);
   const [toggles, setToggles] = useState<LayerToggles>({
     mark: true,
-    mmFills: true,
-    hfFills: true,
-    quoteRanges: true,
+    mmFills: false,
+    hfFills: false,
+    quoteRanges: false,
     settlement: true,
-    info: true,
+    info: false,
   });
   const [hiddenAgents, setHiddenAgents] = useState<Set<string>>(new Set());
+  const [pulsePos, setPulsePos] = useState<{ x: number; y: number } | null>(
+    null
+  );
+
+  const isLive = episode.market_state === "RUNNING";
 
   useEffect(() => {
     api
@@ -239,6 +246,50 @@ export function TimeSeriesChart({
     return row?.xIndex ?? null;
   })();
 
+  // Last mark point for the live pulse — skip the synthetic settlement row.
+  const lastMarkPoint = useMemo(() => {
+    if (!isLive || !toggles.mark) return null;
+    for (let i = chartRows.length - 1; i >= 0; i--) {
+      const r = chartRows[i];
+      if (r.phase !== "S" && r.mark != null) {
+        return { xMs: r.xIndex, y: r.mark };
+      }
+    }
+    return null;
+  }, [chartRows, isLive, toggles.mark]);
+
+  const updatePulsePos = useCallback(
+    (_fig: any, gd: any) => {
+      if (!lastMarkPoint || !gd || !gd._fullLayout) {
+        setPulsePos((prev) => (prev === null ? prev : null));
+        return;
+      }
+      const xa = gd._fullLayout.xaxis;
+      const ya = gd._fullLayout.yaxis;
+      const margin = gd._fullLayout.margin;
+      if (!xa || !ya || !margin || typeof xa.d2p !== "function") return;
+      const px = xa.d2p(lastMarkPoint.xMs);
+      const py = ya.d2p(lastMarkPoint.y);
+      if (px == null || py == null || !isFinite(px) || !isFinite(py)) return;
+      const next = { x: margin.l + px, y: margin.t + py };
+      setPulsePos((prev) => {
+        if (
+          prev &&
+          Math.abs(prev.x - next.x) < 0.5 &&
+          Math.abs(prev.y - next.y) < 0.5
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    },
+    [lastMarkPoint]
+  );
+
+  useEffect(() => {
+    if (!lastMarkPoint) setPulsePos(null);
+  }, [lastMarkPoint]);
+
   // Build Plotly traces.
   const { traces, layout } = useMemo(() => {
     const traces: any[] = [];
@@ -282,14 +333,14 @@ export function TimeSeriesChart({
         name: "MM fills",
         marker: {
           color: PHASE_COLORS.MM,
-          size: visibleMmFillRows.map((f) => 6 + Math.sqrt(f.size) * 2),
+          size: FILL_MARKER_SIZE,
           symbol: "circle",
           opacity: 0.75,
           line: { color: PHASE_COLORS.MM, width: 1 },
         },
         hovertemplate: visibleMmFillRows.map(
           (f) =>
-            `MM fill<br>${f.buyer} <-> ${f.seller}<br>Price: ${fmtPrice(f.price, 4)}<br>Size: ${f.size}<extra></extra>`
+            `MM fill<br>${stripMarketPrefix(f.buyer)} <-> ${stripMarketPrefix(f.seller)}<br>Price: ${fmtPrice(f.price, 4)}<br>Size: ${f.size}<extra></extra>`
         ),
       });
     }
@@ -301,15 +352,16 @@ export function TimeSeriesChart({
         const fills = visibleHfFillRows.filter((f) => f.taker_hf === acct);
         if (fills.length === 0) continue;
         const color = agentColors[acct];
+        const shortAcct = stripMarketPrefix(acct);
         traces.push({
           x: fills.map((f) => f.xIndex),
           y: fills.map((f) => f.price),
           type: "scatter",
           mode: "markers",
-          name: `${acct} taker`,
+          name: `${shortAcct} taker`,
           marker: {
             color: color,
-            size: fills.map((f) => 8 + Math.sqrt(f.size) * 2),
+            size: FILL_MARKER_SIZE,
             symbol: fills.map((f) =>
               f.direction === "up" ? "triangle-up" : "triangle-down"
             ),
@@ -318,7 +370,7 @@ export function TimeSeriesChart({
           },
           hovertemplate: fills.map(
             (f) =>
-              `${acct} ${f.direction === "up" ? "BUY" : "SELL"}<br>${f.buyer} -> ${f.seller}<br>Price: ${fmtPrice(f.price, 4)}<br>Size: ${f.size}<extra></extra>`
+              `${shortAcct} ${f.direction === "up" ? "BUY" : "SELL"}<br>${stripMarketPrefix(f.buyer)} -> ${stripMarketPrefix(f.seller)}<br>Price: ${fmtPrice(f.price, 4)}<br>Size: ${f.size}<extra></extra>`
           ),
         });
       }
@@ -333,13 +385,14 @@ export function TimeSeriesChart({
         const whiskers = whiskerByMm[acct] || [];
         if (whiskers.length === 0) continue;
         const color = agentColors[acct];
+        const shortAcct = stripMarketPrefix(acct);
         // Draw bid-ask range as a candlestick-like trace using error bars on the mid.
         traces.push({
           x: whiskers.map((w) => w.xIndex),
           y: whiskers.map((w) => w.mid),
           type: "scatter",
           mode: "markers",
-          name: `${acct} quotes`,
+          name: `${shortAcct} quotes`,
           marker: {
             color: color,
             size: 3,
@@ -357,7 +410,7 @@ export function TimeSeriesChart({
           },
           hovertemplate: whiskers.map(
             (w) =>
-              `${acct} quotes<br>Ask: ${fmtPrice(w.ask, 4)}<br>Mid: ${fmtPrice(w.mid, 4)}<br>Bid: ${fmtPrice(w.bid, 4)}<extra></extra>`
+              `${shortAcct} quotes<br>Ask: ${fmtPrice(w.ask, 4)}<br>Mid: ${fmtPrice(w.mid, 4)}<br>Bid: ${fmtPrice(w.bid, 4)}<extra></extra>`
           ),
         });
       }
@@ -471,117 +524,137 @@ export function TimeSeriesChart({
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0 relative">
         <Plot
           data={traces}
           layout={layout}
           config={PLOTLY_CONFIG as any}
           useResizeHandler
           style={{ width: "100%", height: "100%" }}
+          onInitialized={updatePulsePos}
+          onUpdate={updatePulsePos}
         />
+        {pulsePos && (
+          <div
+            className="absolute pointer-events-none"
+            style={{
+              left: pulsePos.x - 6,
+              top: pulsePos.y - 6,
+              width: 12,
+              height: 12,
+            }}
+            aria-label="Market is live"
+          >
+            <span className="absolute inset-0 rounded-full bg-emerald-400 opacity-60 animate-ping" />
+            <span className="absolute inset-[3px] rounded-full bg-emerald-300 shadow-[0_0_6px_rgba(52,211,153,0.9)]" />
+          </div>
+        )}
       </div>
 
-      {/* Layer toggles + agent chips — compact row pinned below chart */}
-      <div className="flex flex-wrap items-center gap-2 text-xs px-1 pt-2 shrink-0">
-        <LayerToggle
-          label="Mark"
-          color="#ffffff"
-          on={toggles.mark}
-          onClick={() => setToggles((t) => ({ ...t, mark: !t.mark }))}
-        />
-        <LayerToggle
-          label="MM fills"
-          color={PHASE_COLORS.MM}
-          on={toggles.mmFills}
-          onClick={() => setToggles((t) => ({ ...t, mmFills: !t.mmFills }))}
-        />
-        <LayerToggle
-          label="HF fills"
-          color={PHASE_COLORS.HF}
-          on={toggles.hfFills}
-          onClick={() => setToggles((t) => ({ ...t, hfFills: !t.hfFills }))}
-        />
-        <LayerToggle
-          label="Whiskers"
-          color="#a1a1aa"
-          on={toggles.quoteRanges}
-          onClick={() =>
-            setToggles((t) => ({ ...t, quoteRanges: !t.quoteRanges }))
-          }
-        />
-        <LayerToggle
-          label="Settlement"
-          color="#10b981"
-          on={toggles.settlement}
-          dashed
-          onClick={() =>
-            setToggles((t) => ({ ...t, settlement: !t.settlement }))
-          }
-        />
-        <LayerToggle
-          label="Info"
-          color="#f59e0b"
-          on={toggles.info}
-          dashed
-          onClick={() => setToggles((t) => ({ ...t, info: !t.info }))}
-        />
-
-        <span className="w-px h-4 bg-zinc-700 mx-1" />
-
-        {ts.mm_accounts.map((a) => (
-          <AgentChip
-            key={a}
-            id={a}
-            color={agentColors[a]}
-            role="MM"
-            hidden={hiddenAgents.has(a)}
+      {/* Controls below chart — layer toggles, then agent filters by role */}
+      <div className="shrink-0 px-1 pt-3 space-y-2">
+        {/* Row 1: layer toggles */}
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <LayerToggle
+            label="Mark"
+            color="#ffffff"
+            on={toggles.mark}
+            onClick={() => setToggles((t) => ({ ...t, mark: !t.mark }))}
+          />
+          <LayerToggle
+            label="MM fills"
+            color={PHASE_COLORS.MM}
+            on={toggles.mmFills}
+            onClick={() => setToggles((t) => ({ ...t, mmFills: !t.mmFills }))}
+          />
+          <LayerToggle
+            label="HF fills"
+            color={PHASE_COLORS.HF}
+            on={toggles.hfFills}
+            onClick={() => setToggles((t) => ({ ...t, hfFills: !t.hfFills }))}
+          />
+          <LayerToggle
+            label="Whiskers"
+            color="#a1a1aa"
+            on={toggles.quoteRanges}
             onClick={() =>
-              setHiddenAgents((s) => {
-                const next = new Set(s);
-                if (next.has(a)) next.delete(a);
-                else next.add(a);
-                return next;
-              })
+              setToggles((t) => ({ ...t, quoteRanges: !t.quoteRanges }))
             }
           />
-        ))}
-        {ts.hf_accounts.map((a) => (
-          <AgentChip
-            key={a}
-            id={a}
-            color={agentColors[a]}
-            role="HF"
-            hidden={hiddenAgents.has(a)}
+          <LayerToggle
+            label="Settlement"
+            color="#10b981"
+            on={toggles.settlement}
+            dashed
             onClick={() =>
-              setHiddenAgents((s) => {
-                const next = new Set(s);
-                if (next.has(a)) next.delete(a);
-                else next.add(a);
-                return next;
-              })
+              setToggles((t) => ({ ...t, settlement: !t.settlement }))
             }
           />
-        ))}
+          <LayerToggle
+            label="Info"
+            color="#f59e0b"
+            on={toggles.info}
+            dashed
+            onClick={() => setToggles((t) => ({ ...t, info: !t.info }))}
+          />
 
-        {hiddenAgents.size > 0 && (
-          <button
-            onClick={() => setHiddenAgents(new Set())}
-            className="text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-700 rounded px-2 py-1"
-          >
-            show all
-          </button>
-        )}
+          {focusPhaseId !== null && (
+            <>
+              <span className="w-px h-4 bg-zinc-700 mx-1" />
+              <button
+                onClick={onClearFocus}
+                className="text-xs text-red-400 hover:text-red-200 border border-red-800 rounded px-2 py-1"
+              >
+                clear focus
+              </button>
+            </>
+          )}
+        </div>
 
-        {focusPhaseId !== null && (
-          <>
-            <span className="w-px h-4 bg-zinc-700 mx-1" />
-            <button
-              onClick={onClearFocus}
-              className="text-xs text-red-400 hover:text-red-200 border border-red-800 rounded px-2 py-1"
-            >
-              clear focus
-            </button>
-          </>
+        {/* Row 2: agent filters, grouped by role */}
+        {(ts.mm_accounts.length > 0 || ts.hf_accounts.length > 0) && (
+          <div className="flex flex-wrap items-start gap-x-4 gap-y-1 text-xs">
+            {ts.mm_accounts.length > 0 && (
+              <AgentGroup
+                roleLabel="MM"
+                accounts={ts.mm_accounts}
+                agentColors={agentColors}
+                hiddenAgents={hiddenAgents}
+                onToggle={(a) =>
+                  setHiddenAgents((s) => {
+                    const next = new Set(s);
+                    if (next.has(a)) next.delete(a);
+                    else next.add(a);
+                    return next;
+                  })
+                }
+              />
+            )}
+            {ts.hf_accounts.length > 0 && (
+              <AgentGroup
+                roleLabel="HF"
+                accounts={ts.hf_accounts}
+                agentColors={agentColors}
+                hiddenAgents={hiddenAgents}
+                onToggle={(a) =>
+                  setHiddenAgents((s) => {
+                    const next = new Set(s);
+                    if (next.has(a)) next.delete(a);
+                    else next.add(a);
+                    return next;
+                  })
+                }
+              />
+            )}
+            {hiddenAgents.size > 0 && (
+              <button
+                onClick={() => setHiddenAgents(new Set())}
+                className="text-[11px] text-zinc-400 hover:text-zinc-100 underline underline-offset-2 self-center"
+              >
+                show all
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -623,16 +696,45 @@ function LayerToggle({
   );
 }
 
+function AgentGroup({
+  roleLabel,
+  accounts,
+  agentColors,
+  hiddenAgents,
+  onToggle,
+}: {
+  roleLabel: "MM" | "HF";
+  accounts: string[];
+  agentColors: Record<string, string>;
+  hiddenAgents: Set<string>;
+  onToggle: (accountId: string) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+      <span className="text-[10px] uppercase tracking-widest text-zinc-500 pr-1">
+        {roleLabel}
+      </span>
+      {accounts.map((a) => (
+        <AgentChip
+          key={a}
+          id={a}
+          color={agentColors[a]}
+          hidden={hiddenAgents.has(a)}
+          onClick={() => onToggle(a)}
+        />
+      ))}
+    </div>
+  );
+}
+
 function AgentChip({
   id,
   color,
-  role,
   hidden,
   onClick,
 }: {
   id: string;
   color: string;
-  role: "MM" | "HF";
   hidden: boolean;
   onClick: () => void;
 }) {
@@ -641,26 +743,23 @@ function AgentChip({
       onClick={onClick}
       title={hidden ? "click to show" : "click to hide"}
       className={
-        "flex items-center gap-2 px-2 py-1 rounded border transition " +
+        "inline-flex items-center gap-1.5 px-1.5 py-0.5 rounded-full border transition " +
         (hidden
           ? "border-zinc-800 bg-zinc-950/30 opacity-40 hover:opacity-70"
-          : "border-zinc-800 bg-zinc-950/50 hover:border-zinc-700")
+          : "border-zinc-800 bg-zinc-950/50 hover:border-zinc-600")
       }
     >
       <span
-        className="inline-block w-3 h-3 rounded-sm"
+        className="inline-block w-2 h-2 rounded-full shrink-0"
         style={{ background: color }}
       />
       <span
         className={
-          "font-mono " +
+          "font-mono text-[11px] " +
           (hidden ? "text-zinc-500 line-through" : "text-zinc-200")
         }
       >
-        {id}
-      </span>
-      <span className="text-[10px] uppercase tracking-widest text-zinc-500">
-        {role}
+        {stripMarketPrefix(id)}
       </span>
     </button>
   );
