@@ -208,6 +208,16 @@ async def _run(args: Any) -> None:
         agent_specs=agent_specs,
     )
 
+    if not os.path.isabs(args.db) and os.path.exists("/.dockerenv"):
+        print(
+            f"[run_live] WARNING: --db={args.db!r} is a relative path inside a "
+            f"container. The DB will be written to $CWD/{args.db}, which on "
+            f"Railway is /app/ (ephemeral — wiped on every redeploy). "
+            f"Set DB_PATH to an absolute path on your persistent volume "
+            f"(e.g. /data/modelx.db) to keep trade history across deploys.",
+            file=sys.stderr, flush=True,
+        )
+
     db = connect(args.db)
     supervisor = MarketSupervisor(
         config=config,
