@@ -78,7 +78,7 @@ modelx/
 - Sharpe ratio (per-cycle PnL series)
 - Volume (total contracts traded)
 - Volume share (MM's volume / total market volume)
-- PnL bps (10000 * PnL / volume)
+- PnL bps (10000 * PnL / notional, where notional = sum of price * size across the account's fills)
 - Uptime (quotes submitted / quotes requested, i.e. cycles where MM actually quoted)
 - Consensus (1 - volume_matched_with_other_MMs / total_order_volume)
 - 1-cycle markout, 5-cycle markout, 20-cycle markout
@@ -94,3 +94,6 @@ modelx/
 - Positive markout = the trade was good (price moved in your favor)
 - For MMs: direction is from MM's perspective (bought = +1, sold = -1)
 - For HFs: direction is from HF's perspective
+- Each horizon is exposed in both point and bps form. The bps form is size-weighted
+  markout divided by size-weighted average fill price, times 10000 — the dashboard
+  renders the bps form.

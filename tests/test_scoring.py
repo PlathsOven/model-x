@@ -102,7 +102,8 @@ def test_single_mm_single_hf_metrics():
 
     assert mm["mm-A"].volume == 9
     assert mm["mm-A"].volume_share == 1.0
-    assert abs(mm["mm-A"].pnl_bps - (10000 * -45.0 / 9)) < 1e-6
+    # Notional = 3*105 + 3*110 + 3*115 = 990; pnl_bps = 10000 * -45 / 990.
+    assert abs(mm["mm-A"].pnl_bps - (10000 * -45.0 / 990.0)) < 1e-6
     assert mm["mm-A"].uptime == 1.0
     assert mm["mm-A"].consensus == 1.0  # no other MMs
     # abs positions at end of each cycle: 3, 6, 9 -> avg 6.
@@ -251,8 +252,8 @@ def test_multiplier_scales_pnl_and_pnl_bps():
     # Base pnls are -45 / 45; with multiplier 10 they become -450 / 450.
     assert abs(mm["mm-A"].total_pnl - (-450.0)) < 1e-9
     assert abs(hf["hf-X"].total_pnl - 450.0) < 1e-9
-    # pnl_bps uses multiplier-scaled pnl over raw volume.
-    assert abs(mm["mm-A"].pnl_bps - (10000 * -450.0 / 9)) < 1e-6
+    # pnl_bps uses multiplier-scaled pnl over notional (990).
+    assert abs(mm["mm-A"].pnl_bps - (10000 * -450.0 / 990.0)) < 1e-6
 
 
 def test_markouts_beyond_horizon_return_zero():

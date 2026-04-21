@@ -260,10 +260,11 @@ Two tables print after settlement: one for market makers, one for hedge funds.
 | `sharpe` | Risk-adjusted return — mean per-cycle P&L change divided by its standard deviation. Higher = more consistent |
 | `volume` | Total contracts traded across all cycles |
 | `volume_share` | Their share of total market volume. Note that both sides of every fill count, so shares across all participants sum above 1.0 |
-| `pnl_bps` | P&L per contract traded, in basis points — "edge per trade" |
+| `pnl_bps` | P&L as basis points of notional traded (`10000 * pnl / sum(price * size)`) — "edge per dollar of notional" |
 | `uptime` | Fraction of cycles where the MM submitted a quote. 1.0 = quoted every cycle |
 | `consensus` | 1.0 minus the share of their volume that traded against another MM. High consensus = they were alone at their price |
-| `markout_1` / `markout_5` / `markout_20` | Average per-contract P&L move 1, 5, and 20 cycles after each fill, from the MM's perspective. Positive = trades that aged well |
+| `markout_2` / `markout_10` / `markout_40` | Average per-contract P&L move N phases after each fill, from the MM's perspective. Positive = trades that aged well |
+| `markout_2_bps` / `markout_10_bps` / `markout_40_bps` | Same markouts expressed as basis points of notional (size-weighted markout over size-weighted fill price × 10000). The dashboard renders these |
 | `avg_abs_position` | Average absolute open position — a risk-taking proxy |
 | `self_cross_count` / `self_cross_volume` | How many times (and how many contracts) the MM traded against itself by quoting a bid above its own ask. Diagnostic for confused models |
 
@@ -273,7 +274,8 @@ Two tables print after settlement: one for market makers, one for hedge funds.
 |---|---|
 | `total_pnl` | Final P&L in points |
 | `sharpe` | Same as MM |
-| `markout_1` / `markout_5` / `markout_20` | Average per-contract P&L move N cycles after each HF fill |
+| `markout_2` / `markout_10` / `markout_40` | Average per-contract P&L move N phases after each HF fill |
+| `markout_2_bps` / `markout_10_bps` / `markout_40_bps` | Same markouts as basis points of notional. The dashboard renders these |
 
 ## Playing as a human
 

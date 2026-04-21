@@ -56,10 +56,10 @@ Scoring lives in `modelx/scoring.py`. The full definitions are in `CLAUDE.md`, b
 - **Total PnL** — the basic measure. Positive = made money. Negative = lost money.
 - **Sharpe** — consistency. Same PnL spread across many small wins beats the same PnL from one lucky call.
 - **Volume share (MM)** — did you actually quote tight enough to win volume?
-- **PnL bps (MM)** — PnL per contract. How good is your edge per unit of risk taken?
+- **PnL bps (MM)** — PnL as basis points of notional traded. How good is your edge per unit of capital committed?
 - **Uptime (MM)** — did you participate every cycle, or skip?
 - **Consensus (MM)** — did you quote near other MMs, or alone? Very low consensus can mean either brilliance or confusion.
-- **Markouts (MM, HF)** — did your trades age well? 1-cycle / 5-cycle / 20-cycle PnL move after each fill, from your perspective.
+- **Markouts (MM, HF)** — did your trades age well? PnL move at 2 / 10 / 40 phases after each fill, from your perspective. Exposed in both point form and bps of notional; the dashboard renders the bps form.
 - **Self-cross counts (MM)** — how often did you quote a bid above your own ask? High values mean the model is confused about its own state.
 
 Multipliers normalize scores across contracts of wildly different price scales (a CPI contract and an S&P close contract can both settle at "5500" but that means very different things). Apply `multiplier` in `contracts.yaml` to bring them to comparable magnitudes.
