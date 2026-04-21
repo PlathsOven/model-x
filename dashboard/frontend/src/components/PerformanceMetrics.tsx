@@ -68,26 +68,36 @@ export function PerformanceMetrics({
     else if (role === "HF" && !hasHf && hasMm) setRole("MM");
   }, [role, hasMm, hasHf]);
 
-  // Build per-phase PnL chart data.
+  // Build per-phase PnL chart data — ordered MM first, then HF, with
+  // legendgroup so Plotly renders the legend as two labelled sections.
   const pnlTraces = useMemo(() => {
     if (!positions) return [];
-    const agents = Object.keys(positions.agents);
-    if (agents.length === 0) return [];
 
-    return agents.map((a) => {
-      const points = positions.agents[a];
-      return {
-        x: points.map((p) => new Date(p.timestamp * 1000)),
-        y: points.map((p) => p.pnl_realized ?? p.pnl_mtm),
-        type: "scatter" as const,
-        mode: "lines" as const,
-        name: stripMarketPrefix(a),
-        line: { color: agentColors[a], width: 2 },
-        connectgaps: true,
-        hovertemplate: `${stripMarketPrefix(a)}<br>PnL: %{y:.4f}<br>%{x}<extra></extra>`,
-      };
-    });
-  }, [positions, agentColors]);
+    const ordered: { id: string; role: Role }[] = [
+      ...mmAccounts.map((id) => ({ id, role: "MM" as const })),
+      ...hfAccounts.map((id) => ({ id, role: "HF" as const })),
+    ];
+
+    return ordered
+      .filter(({ id }) => positions.agents[id])
+      .map(({ id, role }) => {
+        const points = positions.agents[id];
+        const groupTitle =
+          role === "MM" ? "Market makers" : "Hedge funds";
+        return {
+          x: points.map((p) => new Date(p.timestamp * 1000)),
+          y: points.map((p) => p.pnl_realized ?? p.pnl_mtm),
+          type: "scatter" as const,
+          mode: "lines" as const,
+          name: stripMarketPrefix(id),
+          legendgroup: role,
+          legendgrouptitle: { text: groupTitle },
+          line: { color: agentColors[id], width: 2 },
+          connectgaps: true,
+          hovertemplate: `${stripMarketPrefix(id)}<br>PnL: %{y:.4f}<br>%{x}<extra></extra>`,
+        };
+      });
+  }, [positions, agentColors, mmAccounts, hfAccounts]);
 
   const pnlLayout = useMemo(
     () => ({
@@ -108,10 +118,14 @@ export function PerformanceMetrics({
         y: -0.15,
         xanchor: "left" as const,
         yanchor: "top" as const,
+        tracegroupgap: 12,
       },
-      margin: { t: 20, r: 30, b: 60, l: 60 },
+      // Preserve user UI state (legend hidden/shown, zoom, pan) across 2s
+      // polling. Tied to marketId so switching markets starts fresh.
+      uirevision: `pnl-${marketId ?? "default"}`,
+      margin: { t: 20, r: 30, b: 80, l: 60 },
     }),
-    []
+    [marketId]
   );
 
   const mmColumns: MetricColumn[] = useMemo(
