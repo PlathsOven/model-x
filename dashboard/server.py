@@ -512,6 +512,9 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
             "markout_2": None,
             "markout_10": None,
             "markout_40": None,
+            "markout_2_bps": None,
+            "markout_10_bps": None,
+            "markout_40_bps": None,
             "avg_abs_position": avg_abs_pos,
             "self_cross_count": self_count,
             "self_cross_volume": self_vol,
@@ -530,6 +533,9 @@ def _partial_hf_scores(ms: MarketAppState) -> Dict[str, dict]:
             "markout_2": None,
             "markout_10": None,
             "markout_40": None,
+            "markout_2_bps": None,
+            "markout_10_bps": None,
+            "markout_40_bps": None,
         }
     return result
 
@@ -647,7 +653,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="ModelX Debug Dashboard", lifespan=lifespan)
+app = FastAPI(title="ModelX - LLM Prediction Exchange", lifespan=lifespan)
 
 # Permissive CORS for localhost dev — the Vite proxy usually handles this,
 # but a direct hit to :8000 from the browser should still work.

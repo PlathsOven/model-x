@@ -217,6 +217,9 @@ export interface MMScoresDict {
   markout_2: number;
   markout_10: number;
   markout_40: number;
+  markout_2_bps: number;
+  markout_10_bps: number;
+  markout_40_bps: number;
   avg_abs_position: number;
   self_cross_count: number;
   self_cross_volume: number;
@@ -229,6 +232,9 @@ export interface HFScoresDict {
   markout_2: number;
   markout_10: number;
   markout_40: number;
+  markout_2_bps: number;
+  markout_10_bps: number;
+  markout_40_bps: number;
 }
 
 export interface Metrics {

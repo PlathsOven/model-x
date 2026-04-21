@@ -30,6 +30,9 @@ class MMScores:
     markout_2: float
     markout_10: float
     markout_40: float
+    markout_2_bps: float
+    markout_10_bps: float
+    markout_40_bps: float
     avg_abs_position: float
     self_cross_count: int
     self_cross_volume: int
@@ -43,6 +46,9 @@ class HFScores:
     markout_2: float
     markout_10: float
     markout_40: float
+    markout_2_bps: float
+    markout_10_bps: float
+    markout_40_bps: float
 
 
 # ---------- entry points ----------
@@ -67,10 +73,11 @@ def score_mm(
     for acct in sorted(mm_accounts):
         pnl_series = _phase_pnl_series(phases, marks, acct, contract.multiplier)
         volume = _account_volume(fills, acct)
+        notional = _account_notional(fills, acct)
         total_pnl = _pnl(
             fills, positions.get(acct, 0), acct, mark, contract.multiplier,
         )
-        pnl_bps_val = 10000.0 * total_pnl / volume if volume > 0 else 0.0
+        pnl_bps_val = 10000.0 * total_pnl / notional if notional > 0 else 0.0
         mm_acct_vol = _account_volume(mm_fills, acct)
         vol_share = mm_acct_vol / total_mm_volume if total_mm_volume > 0 else 0.0
         self_count, self_vol = _self_crosses(fills, acct)
@@ -86,6 +93,9 @@ def score_mm(
             markout_2=_markout(phases, marks, acct, 2),
             markout_10=_markout(phases, marks, acct, 10),
             markout_40=_markout(phases, marks, acct, 40),
+            markout_2_bps=_markout_bps(phases, marks, acct, 2),
+            markout_10_bps=_markout_bps(phases, marks, acct, 10),
+            markout_40_bps=_markout_bps(phases, marks, acct, 40),
             avg_abs_position=_avg_abs_position(phases, acct),
             self_cross_count=self_count,
             self_cross_volume=self_vol,
@@ -118,6 +128,9 @@ def score_hf(
             markout_2=_markout(phases, marks, acct, 2),
             markout_10=_markout(phases, marks, acct, 10),
             markout_40=_markout(phases, marks, acct, 40),
+            markout_2_bps=_markout_bps(phases, marks, acct, 2),
+            markout_10_bps=_markout_bps(phases, marks, acct, 10),
+            markout_40_bps=_markout_bps(phases, marks, acct, 40),
         )
     return result
 
@@ -189,6 +202,14 @@ def _account_volume(fills: List[Fill], account_id: str) -> int:
     for f in fills:
         if f.buyer_account_id == account_id or f.seller_account_id == account_id:
             total += f.size
+    return total
+
+
+def _account_notional(fills: List[Fill], account_id: str) -> float:
+    total = 0.0
+    for f in fills:
+        if f.buyer_account_id == account_id or f.seller_account_id == account_id:
+            total += f.price * f.size
     return total
 
 
@@ -269,6 +290,33 @@ def _markout(
     if total_size == 0:
         return 0.0
     return total_contrib / total_size
+
+
+def _markout_bps(
+    phases: List[Phase],
+    marks: List[float],
+    account_id: str,
+    n: int,
+) -> float:
+    """N-phase markout as bps of notional, over fills with a target mark."""
+    total_contrib = 0.0
+    total_notional = 0.0
+    for i, phase in enumerate(phases):
+        target = i + n
+        if target >= len(phases):
+            continue
+        target_mark = marks[target]
+        for f in phase.fills:
+            buyer_is = (f.buyer_account_id == account_id)
+            seller_is = (f.seller_account_id == account_id)
+            if not buyer_is and not seller_is:
+                continue
+            direction = (1 if buyer_is else 0) - (1 if seller_is else 0)
+            total_contrib += (target_mark - f.price) * direction * f.size
+            total_notional += f.price * f.size
+    if total_notional == 0:
+        return 0.0
+    return 10000.0 * total_contrib / total_notional
 
 
 def _avg_abs_position(phases: List[Phase], account_id: str) -> float:
