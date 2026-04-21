@@ -2,3 +2,6 @@ httpx
 feedparser
 yfinance
 python-dotenv
+pyyaml
+fastapi
+uvicorn[standard]
