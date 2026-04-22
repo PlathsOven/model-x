@@ -163,8 +163,8 @@ The backend is a single `server.py` file. It deliberately reuses existing
 For unsettled contracts, `score_mm`/`score_hf` raise; the backend wraps them
 in `_compute_scores_safe`, which computes only the settlement-independent
 fields (volume, volume_share, uptime, consensus, avg_abs_position,
-self_cross_*) and returns `None` for PnL/Sharpe/markout/pnl_bps. The frontend
-renders "pending" badges in that case.
+self_cross_*, over_limit_cycles) and returns `None` for
+PnL/Sharpe/markout/pnl_bps. The frontend renders "pending" badges in that case.
 
 State lives in a module-level `AppState` dataclass that is rebuilt lazily on
 every request whose configured `--db` / `--traces` mtimes have changed. The

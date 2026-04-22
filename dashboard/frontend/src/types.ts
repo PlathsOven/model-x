@@ -225,6 +225,7 @@ export interface MMScoresDict {
   avg_abs_position: number;
   self_cross_count: number;
   self_cross_volume: number;
+  over_limit_cycles: number;
 }
 
 export interface HFScoresDict {
@@ -237,6 +238,7 @@ export interface HFScoresDict {
   markout_2_bps: number;
   markout_10_bps: number;
   markout_40_bps: number;
+  over_limit_cycles: number;
 }
 
 export interface Metrics {

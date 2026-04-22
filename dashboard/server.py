@@ -55,6 +55,7 @@ from modelx.scoring import (
     HFScores,
     MMScores,
     _carry_mark_forward,
+    _over_limit_cycles,
     list_lifetime_by_name,
     score_hf,
     score_mm,
@@ -533,6 +534,7 @@ def _partial_mm_scores(ms: MarketAppState) -> Dict[str, dict]:
             "avg_abs_position": avg_abs_pos,
             "self_cross_count": self_count,
             "self_cross_volume": self_vol,
+            "over_limit_cycles": _partial_over_limit_cycles(ms, acct, "MM"),
         }
     return result
 
@@ -551,8 +553,14 @@ def _partial_hf_scores(ms: MarketAppState) -> Dict[str, dict]:
             "markout_2_bps": None,
             "markout_10_bps": None,
             "markout_40_bps": None,
+            "over_limit_cycles": _partial_over_limit_cycles(ms, acct, "HF"),
         }
     return result
+
+
+def _partial_over_limit_cycles(ms: MarketAppState, acct: str, role: str) -> int:
+    limit = ms.contract.position_limit if ms.contract is not None else 100
+    return _over_limit_cycles(ms.phases, acct, role, limit)
 
 
 def _compute_scores_safe(ms: MarketAppState) -> dict:

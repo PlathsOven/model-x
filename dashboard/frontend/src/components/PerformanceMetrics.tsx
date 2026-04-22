@@ -242,6 +242,12 @@ export function PerformanceMetrics({
         get: (a) => metrics?.mm[a]?.self_cross_volume,
         fmt: fmtInt,
       },
+      {
+        key: "over_limit_cycles",
+        label: "Over-limit cyc",
+        get: (a) => metrics?.mm[a]?.over_limit_cycles,
+        fmt: fmtInt,
+      },
     ],
     [metrics]
   );
@@ -282,6 +288,12 @@ export function PerformanceMetrics({
         get: (a) => metrics?.hf[a]?.markout_40_bps,
         fmt: (v) => fmtBps(v, 1),
         colorize: true,
+      },
+      {
+        key: "over_limit_cycles",
+        label: "Over-limit cyc",
+        get: (a) => metrics?.hf[a]?.over_limit_cycles,
+        fmt: fmtInt,
       },
     ],
     [metrics]
