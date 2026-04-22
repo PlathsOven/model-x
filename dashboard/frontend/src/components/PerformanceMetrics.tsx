@@ -15,6 +15,13 @@ import { Plot, DARK_LAYOUT, PLOTLY_CONFIG } from "../lib/plotly-theme";
 import { Badge, Card, SectionHeader } from "./ui";
 
 type Role = "MM" | "HF";
+type ChartMetric = "pnl" | "position" | "cash";
+
+const CHART_METRIC_LABEL: Record<ChartMetric, string> = {
+  pnl: "PnL",
+  position: "Position",
+  cash: "Cash",
+};
 
 interface MetricColumn {
   key: string;
@@ -68,9 +75,11 @@ export function PerformanceMetrics({
     else if (role === "HF" && !hasHf && hasMm) setRole("MM");
   }, [role, hasMm, hasHf]);
 
-  // Build per-phase PnL chart data — ordered MM first, then HF, with
+  const [chartMetric, setChartMetric] = useState<ChartMetric>("pnl");
+
+  // Build per-phase chart traces — ordered MM first, then HF, with
   // legendgroup so Plotly renders the legend as two labelled sections.
-  const pnlTraces = useMemo(() => {
+  const chartTraces = useMemo(() => {
     if (!positions) return [];
 
     const ordered: { id: string; role: Role }[] = [
@@ -84,9 +93,16 @@ export function PerformanceMetrics({
         const points = positions.agents[id];
         const groupTitle =
           role === "MM" ? "Market makers" : "Hedge funds";
+        const yVals = points.map((p) => {
+          if (chartMetric === "position") return p.position;
+          if (chartMetric === "cash") return p.cash;
+          return p.pnl_realized ?? p.pnl_mtm;
+        });
+        const hoverFmt = chartMetric === "position" ? ":.0f" : ":.4f";
+        const label = CHART_METRIC_LABEL[chartMetric];
         return {
           x: points.map((p) => new Date(p.timestamp * 1000)),
-          y: points.map((p) => p.pnl_realized ?? p.pnl_mtm),
+          y: yVals,
           type: "scatter" as const,
           mode: "lines" as const,
           name: stripMarketPrefix(id),
@@ -94,12 +110,12 @@ export function PerformanceMetrics({
           legendgrouptitle: { text: groupTitle },
           line: { color: agentColors[id], width: 2 },
           connectgaps: true,
-          hovertemplate: `${stripMarketPrefix(id)}<br>PnL: %{y:.4f}<br>%{x}<extra></extra>`,
+          hovertemplate: `${stripMarketPrefix(id)}<br>${label}: %{y${hoverFmt}}<br>%{x}<extra></extra>`,
         };
       });
-  }, [positions, agentColors, mmAccounts, hfAccounts]);
+  }, [positions, agentColors, mmAccounts, hfAccounts, chartMetric]);
 
-  const pnlLayout = useMemo(
+  const chartLayout = useMemo(
     () => ({
       ...DARK_LAYOUT,
       xaxis: {
@@ -108,7 +124,7 @@ export function PerformanceMetrics({
       },
       yaxis: {
         ...DARK_LAYOUT.yaxis,
-        tickformat: ".2f",
+        tickformat: chartMetric === "position" ? "d" : ".2f",
       },
       showlegend: true,
       legend: {
@@ -121,11 +137,11 @@ export function PerformanceMetrics({
         tracegroupgap: 12,
       },
       // Preserve user UI state (legend hidden/shown, zoom, pan) across 2s
-      // polling. Tied to marketId so switching markets starts fresh.
-      uirevision: `pnl-${marketId ?? "default"}`,
+      // polling. Tied to marketId + metric so switching resets fresh.
+      uirevision: `perf-${chartMetric}-${marketId ?? "default"}`,
       margin: { t: 20, r: 30, b: 80, l: 60 },
     }),
-    [marketId]
+    [marketId, chartMetric]
   );
 
   const mmColumns: MetricColumn[] = useMemo(
@@ -281,12 +297,17 @@ export function PerformanceMetrics({
 
   return (
     <div className="space-y-6">
-      {/* PnL over time */}
-      <Card title="PnL over time">
+      {/* Performance over time */}
+      <Card
+        title={`${CHART_METRIC_LABEL[chartMetric]} over time`}
+        action={
+          <ChartMetricToggle metric={chartMetric} onChange={setChartMetric} />
+        }
+      >
         <div style={{ width: "100%", height: 380 }}>
           <Plot
-            data={pnlTraces as any}
-            layout={pnlLayout as any}
+            data={chartTraces as any}
+            layout={chartLayout as any}
             config={PLOTLY_CONFIG as any}
             useResizeHandler
             style={{ width: "100%", height: "100%" }}
@@ -386,6 +407,39 @@ export function PerformanceMetrics({
           </div>
         )}
       </Card>
+    </div>
+  );
+}
+
+function ChartMetricToggle({
+  metric,
+  onChange,
+}: {
+  metric: ChartMetric;
+  onChange: (m: ChartMetric) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Chart metric"
+      className="inline-flex rounded-md border border-zinc-700 bg-zinc-950 p-0.5"
+    >
+      {(["pnl", "position", "cash"] as const).map((m) => (
+        <button
+          key={m}
+          role="tab"
+          aria-selected={metric === m}
+          onClick={() => onChange(m)}
+          className={
+            "px-3 py-1 text-xs font-medium rounded transition-colors " +
+            (metric === m
+              ? "bg-zinc-700 text-zinc-100"
+              : "text-zinc-400 hover:text-zinc-100")
+          }
+        >
+          {CHART_METRIC_LABEL[m]}
+        </button>
+      ))}
     </div>
   );
 }
