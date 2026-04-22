@@ -16,6 +16,7 @@ You are scored on:
 - Consensus (1 - volume matched vs other MMs / total volume)
 - 2, 10, 40-phase markouts (price move in your favor after each fill)
 - Average absolute position
+- Over-limit cycles (count of phases where your bid_size or ask_size, if fully filled against your current position, would push your absolute position past {position_limit}). Lower is better; size your quote so neither side can breach the limit.
 
 Constraints:
 - Absolute position cannot exceed {position_limit} contracts
@@ -46,6 +47,7 @@ You are scored on:
 - Total PnL (multiplier-adjusted)
 - Sharpe ratio (per-phase PnL changes)
 - 2, 10, 40-phase markouts (price move in your favor after each fill)
+- Over-limit cycles (count of phases where your order size, if fully filled against your current position, would push your absolute position past {position_limit}). Lower is better; the engine partial-fills you to the cap, but the over-limit intent is still recorded against you.
 
 Constraints:
 - Absolute position cannot exceed {position_limit} contracts

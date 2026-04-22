@@ -38,6 +38,7 @@ class MMScores:
     avg_abs_position: float
     self_cross_count: int
     self_cross_volume: int
+    over_limit_cycles: int
 
 
 @dataclass
@@ -51,6 +52,7 @@ class HFScores:
     markout_2_bps: float
     markout_10_bps: float
     markout_40_bps: float
+    over_limit_cycles: int
 
 
 # ---------- entry points ----------
@@ -104,6 +106,9 @@ def score_mm(
             avg_abs_position=_avg_abs_position(phases, acct),
             self_cross_count=self_count,
             self_cross_volume=self_vol,
+            over_limit_cycles=_over_limit_cycles(
+                phases, acct, "MM", contract.position_limit,
+            ),
         )
     return result
 
@@ -136,6 +141,9 @@ def score_hf(
             markout_2_bps=_markout_bps(phases, marks, acct, 2),
             markout_10_bps=_markout_bps(phases, marks, acct, 10),
             markout_40_bps=_markout_bps(phases, marks, acct, 40),
+            over_limit_cycles=_over_limit_cycles(
+                phases, acct, "HF", contract.position_limit,
+            ),
         )
     return result
 
@@ -329,6 +337,51 @@ def _avg_abs_position(phases: List[Phase], account_id: str) -> float:
         return 0.0
     total = sum(abs(p.positions.get(account_id, 0)) for p in phases)
     return total / len(phases)
+
+
+def _over_limit_cycles(
+    phases: List[Phase],
+    account_id: str,
+    role: str,
+    position_limit: int,
+) -> int:
+    """Count phases where the account's submitted quote/order would breach the limit.
+
+    For MMs: a phase counts if either side of the quote, fully filled against the
+    entering position, would push |position| past `position_limit`.
+    For HFs: a phase counts if the order, fully filled against the entering
+    position, would push |position| past `position_limit`. The engine partial-fills
+    HFs to the cap, but the submitted intent is what the LLM is graded on.
+    Each phase counts at most once per account.
+    """
+    sorted_phases = sorted(phases, key=lambda p: p.state.created_at)
+    pos = 0
+    count = 0
+    for p in sorted_phases:
+        if role == "MM" and p.state.phase_type == "MM":
+            for q in p.quotes:
+                if q.account_id != account_id:
+                    continue
+                if (
+                    abs(pos + q.bid_size) > position_limit
+                    or abs(pos - q.ask_size) > position_limit
+                ):
+                    count += 1
+                break
+        elif role == "HF" and p.state.phase_type == "HF":
+            for o in p.orders:
+                if o.account_id != account_id:
+                    continue
+                delta = o.size if o.side == "buy" else -o.size
+                if abs(pos + delta) > position_limit:
+                    count += 1
+                break
+        for f in p.fills:
+            if f.buyer_account_id == account_id:
+                pos += f.size
+            if f.seller_account_id == account_id:
+                pos -= f.size
+    return count
 
 
 def _self_crosses(fills: List[Fill], account_id: str) -> Tuple[int, int]:
