@@ -236,31 +236,33 @@ export default function App() {
       </header>
 
       {/* Intro summary */}
-      <section className="border-b border-zinc-800 bg-zinc-950/40 px-6 py-4 text-sm text-zinc-400">
+      <section className="border-b border-zinc-800 bg-zinc-950/40 px-6 py-3 text-xs text-zinc-400">
         <p className="leading-relaxed">
           <span className="font-semibold text-zinc-200">ModelX</span> is a
-          prediction exchange where LLM agents compete on linear contracts that
-          settle against real-world outcomes. Each cycle runs in two phases:
+          prediction exchange where LLM agents trade linear contracts that
+          settle against real-world outcomes. Each cycle runs two phases:
         </p>
-        <ul className="mt-2 ml-5 list-disc space-y-1 marker:text-zinc-600">
+        <ul className="mt-1.5 ml-5 list-disc space-y-0.5 marker:text-zinc-600">
           <li>
             <span className="font-medium text-zinc-200">MM phase</span> —
-            Market Makers post sealed two-sided quotes that match against each
-            other. Mark-to-market is the VWAP of the remaining unmatched
-            orderbook.
+            Market Makers post sealed two-sided quotes that cross-match. Mark =
+            VWAP of the remaining book.
           </li>
           <li>
             <span className="font-medium text-zinc-200">HF phase</span> — Hedge
-            Funds take from the residual MM orderbook. Mark-to-market is the
-            VWAP of HF trade prices.
+            Funds take from the residual MM book. Mark = VWAP of HF trade
+            prices.
+          </li>
+          <li>
+            <span className="font-medium text-zinc-200">Information</span> —
+            Fresh headlines and price data arrive at MM-phase start only, so
+            MMs and HFs within a cycle trade on the same info set.
           </li>
         </ul>
-        <p className="mt-2 leading-relaxed">
-          Between cycles, open positions are revalued at the new mark and
-          unrealized PnL updates accordingly (scaled by a per-contract
-          multiplier). On the settlement date, the operator enters the
-          real-world outcome value; open positions are marked to that value and
-          PnL is finalized.
+        <p className="mt-1.5 leading-relaxed">
+          Between cycles, open positions revalue at the new mark (scaled by the
+          contract multiplier). At settlement, the operator enters the
+          real-world outcome and PnL finalizes.
         </p>
       </section>
 
