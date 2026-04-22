@@ -9,9 +9,8 @@ import { TimeSeriesChart } from "./components/TimeSeriesChart";
 import { TradesView } from "./components/TradesView";
 import { ReasoningTraces } from "./components/ReasoningTraces";
 import { PerformanceMetrics } from "./components/PerformanceMetrics";
-import { PositionTracker } from "./components/PositionTracker";
 import { LifetimeMetricsView } from "./components/LifetimeMetrics";
-import { ContextView } from "./components/ContextView";
+import { NewsView } from "./components/NewsView";
 import { fmtInt, fmtPrice, formatSettlementDate } from "./lib/format";
 
 const POLL_INTERVAL_MS = 2000;
@@ -25,8 +24,7 @@ const STATUS_LABEL: Record<EpisodeStatus, string> = {
 
 type TabKey =
   | "performance"
-  | "positions"
-  | "context"
+  | "news"
   | "reasoning"
   | "trades"
   | "lifetime";
@@ -38,8 +36,7 @@ interface TabItem {
 
 const TABS: TabItem[] = [
   { key: "performance", label: "Performance" },
-  { key: "positions", label: "Positions" },
-  { key: "context", label: "Context" },
+  { key: "news", label: "News" },
   { key: "reasoning", label: "Reasoning" },
   { key: "trades", label: "Trades" },
   { key: "lifetime", label: "Lifetime" },
@@ -368,15 +365,8 @@ export default function App() {
                 marketId={marketId}
               />
             )}
-            {activeTab === "positions" && (
-              <PositionTracker
-                episode={episode}
-                dataVersion={dataVersion}
-                marketId={marketId}
-              />
-            )}
-            {activeTab === "context" && (
-              <ContextView
+            {activeTab === "news" && (
+              <NewsView
                 episode={episode}
                 dataVersion={dataVersion}
                 marketId={marketId}

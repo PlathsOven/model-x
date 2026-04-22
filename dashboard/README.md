@@ -20,15 +20,16 @@ dashboard *before* the data exists — every view auto-populates as
   cycle range, and participating agent.
 - **Orderbook** — per-cycle snapshot: MM quotes, MM crosses, residual book (with
   depth bars), HF orders, HF fills, positions before/after.
-- **Metrics** — replicates every metric from `modelx/scoring.py`. For unsettled
+- **Performance** — per-agent time series (switchable between PnL, position, and
+  cash) on top of the full metrics table from `modelx/scoring.py`. For unsettled
   contracts the settlement-independent fields (volume, uptime, consensus,
   self-cross counts) still render; PnL / Sharpe / markout columns show
   *pending*.
-- **Positions** — per-agent time series, switchable between position, PnL, and
-  cash.
-- **Reasoning** — drill into each LLM request/response with filters by agent,
-  phase, and cycle. Errors render in red. Prompt and raw response are
-  collapsible.
+- **News** — headlines and market context shown to agents each cycle, rendered
+  as a chronological feed with source badges and times.
+- **Reasoning** — table of LLM traces (one row per agent-phase) with quote
+  columns; click a row to expand Reasoning, Raw Response, and Prompt. Filter
+  by agent and phase.
 
 ## Running
 

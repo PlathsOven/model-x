@@ -189,7 +189,7 @@ python3 dashboard/server.py --db modelx.db --port 8000
 cd dashboard/frontend && npm install && npm run dev
 ```
 
-The dashboard polls every 2 seconds and live-updates as the runner writes new fills. A market selector dropdown at the top lets you switch between markets; the existing Time Series, Orderbook, Trade Log, Metrics, and Positions tabs all rescope to the selected market. The new **Lifetime** tab is global — it aggregates per-agent stats across every settled market in the database (you'll see it populate after you run `settle.py` on at least one market).
+The dashboard polls every 2 seconds and live-updates as the runner writes new fills. A market selector dropdown at the top lets you switch between markets; the Performance, News, Reasoning, and Trades tabs all rescope to the selected market. The **Lifetime** tab is global — it aggregates per-agent stats across every settled market in the database (you'll see it populate after you run `settle.py` on at least one market).
 
 > **Note:** the dashboard server is a long-running Python process that imports `modelx` once at startup. If you upgrade the code (e.g. add a column to a model dataclass), restart the dashboard backend so it re-imports the new classes — otherwise you'll see errors like `Account.__init__() got an unexpected keyword argument 'market_id'`.
 

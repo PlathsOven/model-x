@@ -54,8 +54,9 @@
 | **Trade Log view** | `dashboard/frontend/src/components/TradeLog.tsx` | `PROD` | `/api/fills` | Filter / sort, row click focuses Time Series |
 | **Orderbook view** | `dashboard/frontend/src/components/Orderbook.tsx` | `PROD` | `/api/orderbook/{cycle}` | Per-cycle snapshot with depth bars |
 | **Metrics view** | `dashboard/frontend/src/components/Metrics.tsx` | `PROD` | `/api/metrics` | All `modelx/scoring.py` metrics with pending badges for unsettled |
-| **Positions view** | `dashboard/frontend/src/components/Positions.tsx` | `PROD` | `/api/positions` | Per-agent time series (position / PnL / cash switchable) |
-| **Reasoning view** | `dashboard/frontend/src/components/Reasoning.tsx` | `PROD` | `/api/traces` | Per-agent prompts + responses, filter by phase/cycle |
+| **Performance view** | `dashboard/frontend/src/components/PerformanceMetrics.tsx` | `PROD` | `/api/positions`, `/api/metrics` | Per-agent time series (PnL / position / cash switchable) above the full metrics table |
+| **News view** | `dashboard/frontend/src/components/NewsView.tsx` | `PROD` | `/api/cycles` | Headlines and market context per cycle, parsed from the info payload and rendered as a feed |
+| **Reasoning view** | `dashboard/frontend/src/components/ReasoningTraces.tsx` | `PROD` | `/api/traces` | Table of LLM traces, expandable rows for Reasoning / Raw Response / Prompt |
 | **Lifetime view** | `dashboard/frontend/src/components/Lifetime.tsx` | `PROD` | `agent_lifetime_stats` via `/api/*` | Aggregate per-agent stats across every settled market |
 | **UI primitives** | `dashboard/frontend/src/components/ui.tsx` | `PROD` | Tailwind | Card, Badge, StatPill, SectionHeader, RoleBadge, EmptyState |
 | **Per-agent color map** | `dashboard/frontend/src/lib/colors.ts` | `PROD` | — | Built once from account lists |
