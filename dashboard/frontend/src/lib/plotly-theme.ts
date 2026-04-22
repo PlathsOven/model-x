@@ -1,7 +1,34 @@
+import { createElement, useEffect, useRef } from "react";
+import type { ComponentProps } from "react";
 import Plotly from "plotly.js-basic-dist-min";
 import createPlotlyComponent from "react-plotly.js/factory";
 
-export const Plot = createPlotlyComponent(Plotly);
+const PlotlyComponent = createPlotlyComponent(Plotly);
+
+type PlotProps = ComponentProps<typeof PlotlyComponent>;
+
+export function Plot(props: PlotProps) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) {
+        e.stopPropagation();
+      }
+    };
+    el.addEventListener("wheel", onWheel, { capture: true });
+    return () =>
+      el.removeEventListener("wheel", onWheel, { capture: true } as any);
+  }, []);
+
+  return createElement(
+    "div",
+    { ref: wrapperRef, style: { width: "100%", height: "100%" } },
+    createElement(PlotlyComponent, props),
+  );
+}
 
 export const DARK_LAYOUT: Partial<Plotly.Layout> = {
   paper_bgcolor: "transparent",
