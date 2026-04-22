@@ -58,6 +58,24 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  useEffect(() => {
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const fire = () => {
+      const count = window.goatcounter?.count;
+      if (count) {
+        count({ path: `/${activeTab}` });
+      } else if (attempts < 20) {
+        attempts++;
+        timer = setTimeout(fire, 500);
+      }
+    };
+    fire();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeTab]);
+
   const loadEpisode = useCallback(async () => {
     try {
       const ep = await api.episode(marketId);
